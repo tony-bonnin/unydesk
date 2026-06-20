@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UnyDesk | Fast Access</title>
+  <meta name="theme-color" content="#3e3aab">
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+  <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
+  <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+  <script defer src="/vendor/alpinejs-csp.min.js"></script>
+</head>
+<body x-data="unydeskLanding()" x-init="boot()">
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><img src="/assets/logo-unydesk.jpg" alt="UnyDesk"></div>
+      </div>
+      <div class="topbar-actions">
+        <template x-if="auth.authenticated">
+          <a class="account-btn" href="/account" :title="'Open account for ' + auth.user.email">
+            <i class="fa-solid fa-circle-user"></i>
+            <span x-text="auth.user.display_name || auth.user.email"></span>
+            <i class="bi bi-chevron-right"></i>
+          </a>
+        </template>
+        <template x-if="!auth.authenticated">
+          <button class="account-btn" type="button" @click="openLogin()">
+            <i class="fa-solid fa-lock"></i>
+            <span>Sign In</span>
+          </button>
+        </template>
+        <div class="topbar-badge">Go App · Alpine-friendly · API-first</div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow"><span>#</span>TRINITY Labs Remote Access</div>
+        <h1 class="slogan">Fast Access</h1>
+        <p>
+          A lightweight remote-control broker built in Go for Alpine Linux, musl-friendly deployment,
+          and clean future integration with UnyPort. You can expose this instance through a generated
+          UnyDesk ID or keep a direct connection model with IP and port.
+        </p>
+        <div class="stats-strip">
+          <div class="stat-block">
+            <span class="stat-kicker">Access ID</span>
+            <span class="stat-value brand" x-text="browserIdentity.public_id"></span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-kicker">Direct Address</span>
+            <span class="stat-value"><code x-text="directAddress()"></code></span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-kicker">Runtime</span>
+            <span class="stat-value">Server</span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-kicker">Version</span>
+            <span class="stat-value" x-text="info.version"></span>
+          </div>
+        </div>
+
+        <div class="connect-grid">
+          <div class="identity">
+            <div class="identity-label">UnyDesk ID</div>
+            <div class="identity-row">
+              <div class="identity-code" x-text="browserIdentity.public_id"></div>
+              <div class="copy-controls">
+                <button class="copy-btn" type="button" @click="copy(browserIdentity.public_id, 'id')" aria-label="Copy ID" title="Copy ID">
+                  <i class="bi bi-copy"></i>
+                </button>
+                <span class="copy-feedback" :class="{ show: copiedField === 'id' }">ID copied!</span>
+              </div>
+            </div>
+          </div>
+          <div class="identity">
+            <div class="identity-label">Direct Address</div>
+            <div class="identity-row">
+              <div class="identity-code direct-address-code" x-text="directAddress()"></div>
+              <div class="copy-controls">
+                <button class="copy-btn" type="button" @click="copy(directAddress(), 'address')" aria-label="Copy address" title="Copy address">
+                  <i class="bi bi-copy"></i>
+                </button>
+                <span class="copy-feedback" :class="{ show: copiedField === 'address' }">Address copied!</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-primary" type="button" @click="openServiceStatus('info')">Open API Info</button>
+          <button class="btn btn-secondary" type="button" @click="openServiceStatus('health')">Health Check</button>
+        </div>
+      </div>
+
+      <aside class="panel-soft">
+        <div class="download-reco">
+          <strong x-text="downloadTitle()"></strong>
+          <p>Detected in your browser. If needed, open the full download list.</p>
+          <div class="download-actions">
+            <a class="download-link" :href="downloadChoice.href" x-text="downloadChoice.cta" :aria-disabled="downloadChoice.href === '#' ? 'true' : 'false'"></a>
+            <button class="btn btn-secondary" type="button" @click="openDownloads()">All host downloads</button>
+          </div>
+          <div class="download-meta" x-text="downloadChoice.meta"></div>
+          <div class="download-note">
+            Windows builds include metadata and <code>SHA256</code> checksums. SmartScreen warnings may still appear until code signing is enabled.
+          </div>
+          <div class="download-note">
+            Quick host test:<br>
+            <code x-text="exampleCommand()"></code>
+          </div>
+        </div>
+
+        <div class="connection-mode-card">
+          <div class="connection-mode-head">
+            <strong>Supported Connection Modes</strong>
+            <span>Choose the path that fits your environment and security model.</span>
+          </div>
+          <div class="connection-mode-grid">
+            <div class="connection-mode-item">
+              <i class="fa-solid fa-id-badge"></i>
+              <div>
+                <strong>UnyDesk ID</strong>
+                <span>Browser-first access using a persistent public identifier.</span>
+              </div>
+            </div>
+            <div class="connection-mode-item">
+              <i class="fa-solid fa-network-wired"></i>
+              <div>
+                <strong>Direct IP:Port</strong>
+                <span>Best for trusted LAN environments and direct routing.</span>
+              </div>
+            </div>
+            <div class="connection-mode-item">
+              <i class="fa-solid fa-download"></i>
+              <div>
+                <strong>Host Binary</strong>
+                <span>Use the installed agent when persistent remote presence is required.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <footer class="footer">
+      <span>Self-hosted remote access by TRINITY Edge Networks.</span>
+      <span>Next step: secure connect flow and real remote-control transport.</span>
+    </footer>
+  </main>
+
+  <div class="modal-backdrop" :class="{ open: downloadsOpen }" :aria-hidden="downloadsOpen ? 'false' : 'true'" @click.self="closeDownloads()">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="download-modal-title">
+      <div class="modal-head">
+        <div>
+          <h3 id="download-modal-title">Host Downloads</h3>
+          <p>Manual platform selection stays available even when automatic detection is uncertain.</p>
+        </div>
+        <button class="modal-close" type="button" @click="closeDownloads()">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="downloads">
+          <template x-for="item in downloads" :key="item.href">
+            <div class="download-card">
+              <div>
+                <strong x-text="item.title"></strong>
+                <span x-text="item.description"></span>
+              </div>
+              <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">Download</a>
+            </div>
+          </template>
+        </div>
+
+        <div class="checksum-box">
+          <strong>Checksums</strong>
+          <div class="checksum-actions">
+            <a class="btn btn-secondary" href="/download/host/checksums" target="_blank" rel="noopener">Open SHA256SUMS</a>
+            <button class="btn btn-secondary" type="button" @click="loadChecksums()">Load in modal</button>
+          </div>
+          <pre class="checksum-view" x-text="checksumsText"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" :class="{ open: loginOpen }" :aria-hidden="loginOpen ? 'false' : 'true'" @click.self="closeLogin()">
+    <div class="modal login-modal" role="dialog" aria-modal="true" aria-labelledby="login-modal-title">
+      <div class="modal-head">
+        <div>
+          <h3 id="login-modal-title"><i class="fa-solid fa-lock"></i> Sign In</h3>
+          <p>Accounts are managed locally through <code>users.json</code>. Public sign-up is disabled.</p>
+        </div>
+        <button class="modal-close" type="button" @click="closeLogin()">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="auth-form">
+          <label class="auth-label">
+            <span><i class="bi bi-envelope"></i> Email</span>
+            <input class="auth-input" type="email" placeholder="admin@example.com" x-model="authForm.email" @keydown.enter="submitAuth()">
+          </label>
+          <label class="auth-label">
+            <span><i class="bi bi-key"></i> Password</span>
+            <input class="auth-input" type="password" placeholder="Password" x-model="authForm.password" @keydown.enter="submitAuth()">
+          </label>
+          <button class="btn btn-primary auth-submit" type="button" @click="submitAuth()">
+            <i class="fa-solid fa-right-to-bracket"></i>
+            <span>Sign In</span>
+          </button>
+        </div>
+        <div class="auth-error" x-show="authError" x-text="authError"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" :class="{ open: serviceStatusOpen }" :aria-hidden="serviceStatusOpen ? 'false' : 'true'" @click.self="closeServiceStatus()">
+    <div class="modal service-status-modal" role="dialog" aria-modal="true" aria-labelledby="service-status-modal-title">
+      <div class="modal-head">
+        <div>
+          <h3 id="service-status-modal-title" x-text="serviceStatus.title"></h3>
+          <p x-text="serviceStatus.subtitle"></p>
+        </div>
+        <button class="modal-close" type="button" @click="closeServiceStatus()">Close</button>
+      </div>
+      <div class="modal-body service-status-body">
+        <div class="service-status-summary">
+          <div class="service-status-pill" :class="serviceStatus.ok ? 'is-ok' : 'is-error'">
+            <span x-text="serviceStatus.ok ? 'Available' : 'Unavailable'"></span>
+          </div>
+          <div class="service-status-meta" x-text="serviceStatus.meta"></div>
+        </div>
+        <pre class="checksum-view service-status-view" x-text="serviceStatus.body"></pre>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

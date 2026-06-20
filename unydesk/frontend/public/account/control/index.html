@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UnyDesk | Host Control</title>
+  <meta name="theme-color" content="#3e3aab">
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+  <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
+  <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/account/control/control.js"></script>
+</head>
+<body class="account-app">
+  <div class="account-dashboard-shell">
+    <section class="account-workspace account-control-workspace">
+      <header class="account-workspace-topbar">
+        <div class="account-topbar-left">
+          <div>
+            <strong class="account-topbar-title">Host Control</strong>
+          </div>
+        </div>
+        <div class="account-topbar-right">
+          <a class="account-btn" href="/account#sessions">
+            <i class="fa-solid fa-arrow-left"></i>
+            <span>Back to sessions</span>
+          </a>
+        </div>
+      </header>
+
+      <main class="account-workspace-main">
+        <div class="message-container hidden" id="session-feedback-wrap">
+          <div class="global-feedback" id="session-feedback"></div>
+        </div>
+
+        <section class="account-panel is-active">
+          <div class="account-panel-copy">
+            <h1 class="slogan" id="session-page-title">Session Control</h1>
+            <p id="session-page-subtitle">Inspect and drive a remote-control session in a dedicated workspace.</p>
+          </div>
+
+          <div class="session-control-grid">
+            <section class="settings-card">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-tower-broadcast"></i> Live Session</strong>
+                  <span>Current control handshake and routing state.</span>
+                </div>
+              </div>
+              <div class="dashboard-grid dashboard-grid-compact">
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Session ID</span>
+                  <strong id="session-detail-id">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Status</span>
+                  <strong id="session-detail-status">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Target</span>
+                  <strong id="session-detail-target">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Viewer</span>
+                  <strong id="session-detail-viewer">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Created</span>
+                  <strong id="session-detail-created">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Updated</span>
+                  <strong id="session-detail-updated">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Route</span>
+                  <strong id="session-detail-route">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Dispatch</span>
+                  <strong id="session-detail-dispatch">—</strong>
+                </div>
+              </div>
+              <div class="session-modal-actions">
+                <button class="btn btn-primary" type="button" id="session-start-signaling-btn">
+                  <i class="fa-solid fa-satellite-dish"></i>
+                  <span>Start viewer signaling</span>
+                </button>
+                <button class="btn btn-secondary" type="button" id="session-send-ping-btn">
+                  <i class="fa-solid fa-paper-plane"></i>
+                  <span>Send ping</span>
+                </button>
+                <button class="btn btn-secondary" type="button" id="session-refresh-btn">
+                  <i class="fa-solid fa-rotate"></i>
+                  <span>Refresh</span>
+                </button>
+                <button class="btn btn-secondary" type="button" id="session-close-btn">
+                  <i class="fa-solid fa-power-off"></i>
+                  <span>Close session</span>
+                </button>
+              </div>
+              <div class="session-control-pad">
+                <div class="session-control-pad-head">
+                  <strong>Control Pad</strong>
+                  <span>Focus the pad, then move, click, or type to send input events.</span>
+                </div>
+                <div class="session-remote-pad" id="session-remote-pad" tabindex="0">
+                  <span>Remote control surface</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-card">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-wave-square"></i> Signaling</strong>
+                  <span>Offer, answer, ICE exchange, and transport traces.</span>
+                </div>
+              </div>
+              <div class="dashboard-grid dashboard-grid-compact">
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Offer</span>
+                  <strong id="session-detail-offer">Waiting</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Answer</span>
+                  <strong id="session-detail-answer">Waiting</strong>
+                </div>
+                <div class="dashboard-stat dashboard-span-2">
+                  <span class="dashboard-label">Viewer Transport</span>
+                  <strong id="session-detail-viewer-transport">Idle</strong>
+                </div>
+                <div class="dashboard-stat dashboard-span-2">
+                  <span class="dashboard-label">ICE Candidates</span>
+                  <strong id="session-detail-candidates">0</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Delivered At</span>
+                  <strong id="session-detail-delivered-at">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Deliveries</span>
+                  <strong id="session-detail-deliveries">0</strong>
+                </div>
+                <div class="dashboard-stat dashboard-span-2">
+                  <span class="dashboard-label">Host Acknowledged</span>
+                  <strong id="session-detail-host-ack">—</strong>
+                </div>
+              </div>
+              <div class="dashboard-form">
+                <label class="auth-label">
+                  <span><i class="fa-solid fa-terminal"></i> Transport Log</span>
+                  <textarea class="auth-input session-preview session-log" id="session-transport-log" readonly placeholder="WebRTC transport events will appear here."></textarea>
+                </label>
+                <label class="auth-label">
+                  <span><i class="fa-solid fa-file-waveform"></i> Offer Preview</span>
+                  <textarea class="auth-input session-preview" id="session-offer-preview" readonly></textarea>
+                </label>
+                <label class="auth-label">
+                  <span><i class="fa-solid fa-file-circle-check"></i> Answer Preview</span>
+                  <textarea class="auth-input session-preview" id="session-answer-preview" readonly></textarea>
+                </label>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </section>
+  </div>
+</body>
+</html>

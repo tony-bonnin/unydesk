@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UnyDesk | Account Dashboard</title>
+  <meta name="theme-color" content="#3e3aab">
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+  <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
+  <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/account/account.js"></script>
+</head>
+<body class="account-app">
+  <div class="account-dashboard-shell">
+    <aside class="account-sidebar">
+      <div class="account-sidebar-brand">
+        <a href="/" title="Back to home">
+          <span class="account-sidebar-brand-mark"><i class="fa-solid fa-tv"></i></span>
+          <strong>UnyDesk</strong>
+        </a>
+      </div>
+
+      <nav class="account-sidebar-nav">
+        <div class="account-nav-section-title">Workspace</div>
+
+        <button class="account-nav-item is-active" type="button" data-section="overview" title="Dashboard overview">
+          <span class="account-nav-icon"><i class="fa-solid fa-layer-group"></i></span>
+          <span>Overview</span>
+        </button>
+
+        <button class="account-nav-item" type="button" data-section="connections" title="Start a new connection">
+          <span class="account-nav-icon"><i class="fa-solid fa-plug-circle-plus"></i></span>
+          <span>New Connection</span>
+        </button>
+
+        <button class="account-nav-item" type="button" data-section="hosts" title="Manage registered hosts">
+          <span class="account-nav-icon"><i class="fa-solid fa-display"></i></span>
+          <span>Hosts</span>
+        </button>
+
+        <button class="account-nav-item" type="button" data-section="sessions" title="Review session activity">
+          <span class="account-nav-icon"><i class="fa-solid fa-arrows-turn-right"></i></span>
+          <span>Sessions</span>
+        </button>
+
+        <div class="account-nav-section-title">Account</div>
+
+        <button class="account-nav-item" type="button" id="sidebar-settings-trigger" title="Open user settings">
+          <span class="account-nav-icon"><i class="fa-solid fa-user-gear"></i></span>
+          <span>User Settings</span>
+        </button>
+      </nav>
+
+      <div class="account-sidebar-footer">
+        <button class="account-sidebar-user" type="button" id="sidebar-user-trigger" title="Open user settings">
+          <div class="account-sidebar-avatar" id="sidebar-avatar">U</div>
+          <div class="account-sidebar-user-info">
+            <strong id="sidebar-user-name">Authenticated user</strong>
+            <span id="sidebar-user-email">Loading…</span>
+          </div>
+        </button>
+
+        <button class="account-nav-item account-nav-logout" type="button" id="logout-btn" title="Sign out">
+          <span class="account-nav-icon"><i class="fa-solid fa-arrow-right-from-bracket"></i></span>
+          <span>Sign out</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="account-mobile-overlay" id="mobile-overlay"></div>
+    <aside class="account-mobile-menu" id="mobile-menu" aria-hidden="true">
+      <div class="account-mobile-header">
+        <div class="account-mobile-brand">
+          <span class="account-sidebar-brand-mark"><i class="fa-solid fa-tv"></i></span>
+          <strong>UnyDesk</strong>
+        </div>
+        <button class="account-mobile-close" type="button" id="mobile-close" aria-label="Close menu">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <button class="account-mobile-user" type="button" id="mobile-user-trigger" title="Open user settings">
+        <div class="account-mobile-avatar" id="mobile-avatar">U</div>
+        <div class="account-mobile-user-info">
+          <strong id="mobile-user-name">Authenticated user</strong>
+          <span id="mobile-user-email">Loading…</span>
+        </div>
+      </button>
+      <nav class="account-mobile-nav" id="mobile-nav">
+        <button class="account-nav-item is-active" type="button" data-section="overview">
+          <span class="account-nav-icon"><i class="fa-solid fa-layer-group"></i></span>
+          <span>Overview</span>
+        </button>
+        <button class="account-nav-item" type="button" data-section="connections">
+          <span class="account-nav-icon"><i class="fa-solid fa-plug-circle-plus"></i></span>
+          <span>New Connection</span>
+        </button>
+        <button class="account-nav-item" type="button" data-section="hosts">
+          <span class="account-nav-icon"><i class="fa-solid fa-display"></i></span>
+          <span>Hosts</span>
+        </button>
+        <button class="account-nav-item" type="button" data-section="sessions">
+          <span class="account-nav-icon"><i class="fa-solid fa-arrows-turn-right"></i></span>
+          <span>Sessions</span>
+        </button>
+        <button class="account-nav-item" type="button" id="mobile-settings-trigger">
+          <span class="account-nav-icon"><i class="fa-solid fa-user-gear"></i></span>
+          <span>User Settings</span>
+        </button>
+        <button class="account-nav-item account-nav-logout" type="button" id="mobile-logout-btn">
+          <span class="account-nav-icon"><i class="fa-solid fa-arrow-right-from-bracket"></i></span>
+          <span>Sign out</span>
+        </button>
+      </nav>
+    </aside>
+
+    <section class="account-workspace">
+      <header class="account-workspace-topbar">
+        <div class="account-topbar-left">
+          <button class="account-hamburger" type="button" id="mobile-open" aria-label="Open menu">
+            <span></span>
+            <span></span>
+            <span></span>
+          </button>
+          <div>
+            <strong class="account-topbar-title" id="workspace-title">Overview</strong>
+          </div>
+        </div>
+        <div class="account-topbar-right">
+          <a class="account-btn" href="/">
+            <i class="fa-solid fa-house"></i>
+            <span>Back to home</span>
+          </a>
+        </div>
+      </header>
+
+      <main class="account-workspace-main">
+        <div class="message-container hidden" id="global-feedback-wrap">
+          <div class="global-feedback" id="global-feedback"></div>
+        </div>
+
+        <section class="account-panel is-active" data-panel="overview">
+          <div class="account-panel-copy">
+            <h1 class="slogan">Account Dashboard</h1>
+            <p>Manage your identity, active hosts, remote sessions, and local credentials from a single secured workspace.</p>
+          </div>
+
+          <div class="account-dashboard">
+            <section class="dashboard-card dashboard-hero dashboard-span-2">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-circle-user"></i> Account</strong>
+                  <span id="account-status">Loading session…</span>
+                </div>
+              </div>
+              <div class="dashboard-grid dashboard-grid-compact">
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Display name</span>
+                  <strong id="account-name">Authenticated user</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Email</span>
+                  <strong id="account-email">—</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Browser ID</span>
+                  <strong id="account-browser-id">Loading…</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Hosts online</span>
+                  <strong id="hosts-online-count">0</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="dashboard-card">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-display"></i> Host Fleet</strong>
+                  <span>Track the live availability of your registered endpoints.</span>
+                </div>
+              </div>
+              <div class="dashboard-grid dashboard-grid-compact">
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Registered hosts</span>
+                  <strong id="hosts-total-count">0</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Offline hosts</span>
+                  <strong id="hosts-offline-count">0</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="dashboard-card">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-arrows-turn-right"></i> Session Activity</strong>
+                  <span>Quick visibility on remote connection activity.</span>
+                </div>
+              </div>
+              <div class="dashboard-grid dashboard-grid-compact">
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Active sessions</span>
+                  <strong id="sessions-active-count">0</strong>
+                </div>
+                <div class="dashboard-stat">
+                  <span class="dashboard-label">Total sessions</span>
+                  <strong id="sessions-total-count">0</strong>
+                </div>
+              </div>
+            </section>
+
+            <section class="dashboard-card dashboard-span-2">
+              <div class="dashboard-head">
+                <div>
+                  <strong><i class="fa-solid fa-laptop-house"></i> Connected Hosts</strong>
+                  <span>Live endpoints available right now from your registered fleet.</span>
+                </div>
+              </div>
+              <div class="overview-hosts-grid" id="overview-hosts-grid">
+                <div class="overview-host-empty">Loading connected hosts…</div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="account-panel" data-panel="connections">
+          <div class="account-panel-copy">
+            <h2>New Connection</h2>
+            <p>Start a new remote session with a registered host, a public UnyDesk ID, or a direct IP:port target.</p>
+          </div>
+
+          <section class="dashboard-card">
+            <div class="dashboard-form">
+              <label class="auth-label">
+                <span><i class="bi bi-pc-display-horizontal"></i> Target</span>
+                <input class="auth-input" type="text" id="session-target" placeholder="Host ID, UnyDesk ID, or IP:port">
+              </label>
+              <label class="auth-label">
+                <span><i class="bi bi-broadcast-pin"></i> Viewer</span>
+                <input class="auth-input" type="text" id="session-viewer" placeholder="Viewer label">
+              </label>
+              <button class="btn btn-primary auth-submit" type="button" id="session-create-btn">
+                <i class="fa-solid fa-plus"></i>
+                <span>Create session</span>
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <section class="account-panel" data-panel="hosts">
+          <div class="account-panel-copy">
+            <h2>Registered Hosts</h2>
+            <p>Review platform, public IDs, and heartbeat state before initiating a new session.</p>
+          </div>
+
+          <section class="dashboard-card">
+            <div class="dashboard-table-wrap">
+              <table class="dashboard-table">
+                <thead>
+                  <tr>
+                    <th>Host</th>
+                    <th>Public ID</th>
+                    <th>Platform</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="hosts-table-body">
+                  <tr><td colspan="5">Loading hosts…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="account-panel" data-panel="sessions">
+          <div class="account-panel-copy">
+            <h2>Session Manager</h2>
+            <p>Monitor pending, active, and historical remote connections from one place.</p>
+          </div>
+
+          <section class="dashboard-card">
+            <div class="dashboard-table-wrap">
+              <table class="dashboard-table">
+                <thead>
+                  <tr>
+                    <th>Session</th>
+                    <th>Target</th>
+                    <th>Viewer</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="sessions-table-body">
+                  <tr><td colspan="6">Loading sessions…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+      </main>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="settings-modal-backdrop">
+    <div class="modal settings-modal">
+      <div class="settings-modal-header">
+        <div class="settings-modal-header-left">
+          <div class="settings-modal-avatar" id="settings-modal-avatar">U</div>
+          <div>
+            <h2 id="settings-modal-name">Authenticated user</h2>
+            <span class="settings-modal-email" id="settings-modal-email">Loading…</span>
+          </div>
+        </div>
+        <button class="modal-close" type="button" id="settings-modal-close" title="Close user settings">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="settings-modal-tabs">
+        <button class="settings-modal-tab is-active" type="button" data-settings-tab="profile">
+          <i class="fa-regular fa-user"></i>
+          <span>Profile</span>
+        </button>
+        <button class="settings-modal-tab" type="button" data-settings-tab="preferences">
+          <i class="fa-solid fa-sliders"></i>
+          <span>Preferences</span>
+        </button>
+        <button class="settings-modal-tab" type="button" data-settings-tab="password">
+          <i class="fa-solid fa-lock"></i>
+          <span>Password</span>
+        </button>
+      </div>
+
+      <div class="modal-body settings-modal-body">
+        <div class="message-container hidden settings-feedback-wrap" id="settings-feedback-wrap">
+          <div class="global-feedback" id="settings-feedback"></div>
+        </div>
+
+        <div class="settings-tab-panel is-active" data-settings-panel="profile">
+          <section class="settings-card">
+            <h3>Identity</h3>
+            <p class="settings-card-desc">Control the avatar fallback, display name, and account email shown in the workspace.</p>
+            <div class="dashboard-form">
+              <label class="auth-label">
+                <span><i class="fa-regular fa-id-badge"></i> Initials</span>
+                <input class="auth-input input-short" type="text" id="profile-avatar" placeholder="UD" maxlength="2">
+              </label>
+              <label class="auth-label">
+                <span><i class="fa-regular fa-user"></i> Display name</span>
+                <input class="auth-input" type="text" id="profile-display-name" placeholder="Display name" maxlength="64">
+              </label>
+              <label class="auth-label">
+                <span><i class="fa-regular fa-envelope"></i> Email</span>
+                <input class="auth-input" type="email" id="profile-email" placeholder="name@example.com" autocomplete="email">
+              </label>
+              <button class="btn btn-primary auth-submit" type="button" id="profile-save-btn">
+                <i class="fa-solid fa-floppy-disk"></i>
+                <span>Save profile</span>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="preferences">
+          <section class="settings-card">
+            <h3>Interface</h3>
+            <p class="settings-card-desc">Preferences are stored locally in this browser for a lighter and faster dashboard experience.</p>
+            <div class="dashboard-form">
+              <label class="auth-label">
+                <span><i class="fa-regular fa-moon"></i> Theme</span>
+                <select class="auth-input" id="pref-theme">
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <label class="auth-label">
+                <span><i class="fa-solid fa-compass"></i> Default section</span>
+                <select class="auth-input" id="pref-default-section">
+                  <option value="overview">Overview</option>
+                  <option value="connections">New Connection</option>
+                  <option value="hosts">Hosts</option>
+                  <option value="sessions">Sessions</option>
+                </select>
+              </label>
+              <button class="btn btn-secondary auth-submit" type="button" id="preferences-save-btn">
+                <i class="fa-solid fa-sliders"></i>
+                <span>Save preferences</span>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-panel="password">
+          <section class="settings-card">
+            <h3>Security</h3>
+            <p class="settings-card-desc">Update the password used by this locally managed account.</p>
+            <div class="dashboard-form">
+              <label class="auth-label">
+                <span><i class="bi bi-shield-lock"></i> Current password</span>
+                <input class="auth-input" type="password" id="password-current" placeholder="Current password">
+              </label>
+              <label class="auth-label">
+                <span><i class="bi bi-key-fill"></i> New password</span>
+                <input class="auth-input" type="password" id="password-new" placeholder="New password">
+              </label>
+              <button class="btn btn-primary auth-submit" type="button" id="password-change-btn">
+                <i class="fa-solid fa-lock"></i>
+                <span>Update password</span>
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="session-modal-backdrop">
+    <div class="modal session-modal">
+      <div class="modal-head">
+        <div>
+          <h3 id="session-modal-title">Session Control</h3>
+          <p id="session-modal-subtitle">Inspect and manage a remote-control session.</p>
+        </div>
+        <button class="modal-close" type="button" id="session-modal-close" title="Close session control">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div class="modal-body session-modal-body">
+        <div class="message-container hidden" id="session-feedback-wrap">
+          <div class="global-feedback" id="session-feedback"></div>
+        </div>
+
+        <div class="session-control-grid">
+          <section class="settings-card">
+            <div class="dashboard-head">
+              <div>
+                <strong><i class="fa-solid fa-tower-broadcast"></i> Live Session</strong>
+                <span>Current control handshake and routing state.</span>
+              </div>
+            </div>
+            <div class="dashboard-grid dashboard-grid-compact">
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Session ID</span>
+                <strong id="session-detail-id">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Status</span>
+                <strong id="session-detail-status">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Target</span>
+                <strong id="session-detail-target">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Viewer</span>
+                <strong id="session-detail-viewer">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Created</span>
+                <strong id="session-detail-created">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Updated</span>
+                <strong id="session-detail-updated">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Route</span>
+                <strong id="session-detail-route">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Dispatch</span>
+                <strong id="session-detail-dispatch">—</strong>
+              </div>
+            </div>
+            <div class="session-modal-actions">
+              <button class="btn btn-primary" type="button" id="session-start-signaling-btn">
+                <i class="fa-solid fa-satellite-dish"></i>
+                <span>Start viewer signaling</span>
+              </button>
+              <button class="btn btn-secondary" type="button" id="session-send-ping-btn">
+                <i class="fa-solid fa-paper-plane"></i>
+                <span>Send ping</span>
+              </button>
+              <button class="btn btn-secondary" type="button" id="session-refresh-btn">
+                <i class="fa-solid fa-rotate"></i>
+                <span>Refresh</span>
+              </button>
+              <button class="btn btn-secondary" type="button" id="session-close-btn">
+                <i class="fa-solid fa-power-off"></i>
+                <span>Close session</span>
+              </button>
+            </div>
+            <div class="session-control-pad">
+              <div class="session-control-pad-head">
+                <strong>Control Pad</strong>
+                <span>Focus the pad, then move, click, or type to send input events.</span>
+              </div>
+              <div class="session-remote-pad" id="session-remote-pad" tabindex="0">
+                <span>Remote control surface</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <div class="dashboard-head">
+              <div>
+                <strong><i class="fa-solid fa-wave-square"></i> Signaling</strong>
+                <span>Prepared for the upcoming host and viewer transport wiring.</span>
+              </div>
+            </div>
+            <div class="dashboard-grid dashboard-grid-compact">
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Offer</span>
+                <strong id="session-detail-offer">Waiting</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Answer</span>
+                <strong id="session-detail-answer">Waiting</strong>
+              </div>
+              <div class="dashboard-stat dashboard-span-2">
+                <span class="dashboard-label">Viewer Transport</span>
+                <strong id="session-detail-viewer-transport">Idle</strong>
+              </div>
+              <div class="dashboard-stat dashboard-span-2">
+                <span class="dashboard-label">ICE Candidates</span>
+                <strong id="session-detail-candidates">0</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Delivered At</span>
+                <strong id="session-detail-delivered-at">—</strong>
+              </div>
+              <div class="dashboard-stat">
+                <span class="dashboard-label">Deliveries</span>
+                <strong id="session-detail-deliveries">0</strong>
+              </div>
+              <div class="dashboard-stat dashboard-span-2">
+                <span class="dashboard-label">Host Acknowledged</span>
+                <strong id="session-detail-host-ack">—</strong>
+              </div>
+            </div>
+            <div class="dashboard-form">
+              <label class="auth-label">
+                <span><i class="fa-solid fa-terminal"></i> Transport Log</span>
+                <textarea class="auth-input session-preview session-log" id="session-transport-log" readonly placeholder="WebRTC transport events will appear here."></textarea>
+              </label>
+              <label class="auth-label">
+                <span><i class="fa-solid fa-file-waveform"></i> Offer Preview</span>
+                <textarea class="auth-input session-preview" id="session-offer-preview" readonly placeholder="Offer SDP will appear here when the viewer transport is connected."></textarea>
+              </label>
+              <label class="auth-label">
+                <span><i class="fa-solid fa-file-circle-check"></i> Answer Preview</span>
+                <textarea class="auth-input session-preview" id="session-answer-preview" readonly placeholder="Answer SDP will appear here when the host transport is connected."></textarea>
+              </label>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

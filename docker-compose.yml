@@ -1,0 +1,41 @@
+services:
+  unydesk:
+    image: golang:alpine
+    container_name: unydesk
+    working_dir: /app/unydesk/backend
+    environment:
+      UNYDESK_ASSETS: /app/unydesk/frontend/public
+    command:
+      - sh
+      - -c
+      - |
+        go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest &&
+        go mod tidy &&
+        mkdir -p ./tmp/host-downloads &&
+        rm -f ./cmd/unydesk-host/resource.syso &&
+        cd ./cmd/unydesk-host &&
+        $(go env GOPATH)/bin/goversioninfo -64 -o resource.syso versioninfo.json &&
+        cd /app/unydesk/backend &&
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-linux-amd64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-linux-arm64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-windows-amd64.exe ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-windows-arm64.exe ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-darwin-amd64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-darwin-arm64 ./cmd/unydesk-host &&
+        cd ./tmp/host-downloads &&
+        sha256sum unydesk-host-linux-amd64 unydesk-host-linux-arm64 unydesk-host-windows-amd64.exe unydesk-host-windows-arm64.exe unydesk-host-darwin-amd64 unydesk-host-darwin-arm64 > SHA256SUMS &&
+        cd /app/unydesk/backend &&
+        CGO_ENABLED=0 go build -o ./tmp/unydesk ./cmd/unydesk &&
+        echo ">>> DEV frontend served from disk: $${UNYDESK_ASSETS}" &&
+        ./tmp/unydesk
+    restart: unless-stopped
+    volumes:
+      - ./unydesk:/app/unydesk
+      - go-cache:/root/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    ports:
+      - "192.168.3.5:8890:8890"
+
+volumes:
+  go-cache:
+  go-build-cache:

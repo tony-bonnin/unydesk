@@ -1,0 +1,12 @@
+name: UnyDesk
+listen_addr: ":8890"
+security:
+  allow_origin: "*"
+remote:
+  session_ttl_minutes: 30
+  host_heartbeat_seconds: 35
+paths:
+  public_id_file: settings/public-id
+  host_downloads_dir: tmp/host-downloads
+  frontend_dir: ../frontend/public
+  users_file: settings/users.json
