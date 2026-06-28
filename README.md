@@ -77,6 +77,21 @@ Default URL:
 http://127.0.0.1:8890
 ```
 
+## Windows host double-click
+
+The Windows host binary can now auto-connect on double-click without passing `--server`, using this priority:
+
+- `--server`
+- `UNYDESK_SERVER`
+- a sidecar file next to the `.exe`: `unydesk-host.json`, `unydesk-host.txt`, or `server.txt`
+- the embedded default server URL injected at build time
+
+Example sidecar file:
+
+```json
+{"server":"http://192.168.3.5:8890"}
+```
+
 ## Suggested next steps
 
 1. Add a lightweight agent process for Alpine hosts.

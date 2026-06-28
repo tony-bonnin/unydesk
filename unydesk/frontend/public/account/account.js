@@ -140,6 +140,20 @@
     return 'unydesk.browser.token';
   }
 
+  function browserIdentityRequestURL() {
+    let token = window.localStorage.getItem(browserTokenStorageKey()) || '';
+    if (!token && window.crypto && window.crypto.getRandomValues) {
+      const raw = new Uint8Array(24);
+      window.crypto.getRandomValues(raw);
+      token = Array.from(raw, (value) => value.toString(16).padStart(2, '0')).join('');
+    }
+
+    const params = new URLSearchParams();
+    params.set('token', token);
+
+    return `/api/v1/browser/identity?${params.toString()}`;
+  }
+
   function setFeedback(target, kind, message) {
     if (!target && globalFeedbackEl && globalFeedbackWrapEl) {
       globalFeedbackEl.textContent = message;
@@ -222,6 +236,17 @@
     return 'fa-solid fa-desktop';
   }
 
+  function hostRoleLabel(host) {
+    return String(host && host.role ? host.role : 'host').trim().toLowerCase() === 'client' ? 'Client' : 'Host';
+  }
+
+  function hostStatusClass(host) {
+    const status = String(host && host.status ? host.status : '').trim().toLowerCase();
+    if (status === 'online') return 'is-online';
+    if (status === 'paused') return 'is-paused';
+    return 'is-offline';
+  }
+
   function userInitials(user) {
     const avatar = user && typeof user.avatar === 'string' ? user.avatar.trim() : '';
     if (avatar) return avatar.slice(0, 2).toUpperCase();
@@ -279,7 +304,7 @@
     state.sessionPollTimer = window.setInterval(() => {
       if (!state.currentSessionID || !state.sessionModalOpen) return;
       void refreshSessionDetails(false);
-    }, 750);
+    }, 250);
   }
 
   function stopSessionPolling() {
@@ -457,7 +482,8 @@
     sessionStartSignalingBtn.disabled = true;
     try {
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
+        iceServers: [],
+        iceCandidatePoolSize: 1,
       });
       state.viewerPeerConnection = pc;
       state.viewerTransportState = 'Starting';
@@ -651,13 +677,7 @@
   }
 
   async function ensureBrowserIdentity() {
-    let token = window.localStorage.getItem(browserTokenStorageKey()) || '';
-    if (!token && window.crypto && window.crypto.getRandomValues) {
-      const raw = new Uint8Array(24);
-      window.crypto.getRandomValues(raw);
-      token = Array.from(raw, (value) => value.toString(16).padStart(2, '0')).join('');
-    }
-    const response = await fetch(`/api/v1/browser/identity?token=${encodeURIComponent(token)}`);
+    const response = await fetch(browserIdentityRequestURL());
     captureCSRF(response);
     if (!response.ok) throw new Error('browser identity fetch failed');
     state.browserIdentity = await response.json();
@@ -665,6 +685,7 @@
       window.localStorage.setItem(browserTokenStorageKey(), state.browserIdentity.token);
     }
     browserIDEl.textContent = state.browserIdentity.public_id || 'Unavailable';
+    browserIDEl.title = 'Reserved local client identity for this browser';
     if (!sessionViewerEl.value) {
       sessionViewerEl.value = state.browserIdentity.public_id || '';
     }
@@ -727,20 +748,27 @@
     }
     hostsTableBody.innerHTML = state.hosts.map((host) => `
       <tr>
-        <td><strong>${escapeHTML(host.hostname || host.name || 'unknown host')}</strong></td>
+        <td class="host-table-cell">
+          <div class="host-name-stack">
+            <strong>${escapeHTML(host.hostname || host.name || 'unknown host')}</strong>
+            <span class="host-secondary-id">${escapeHTML(`${hostRoleLabel(host)} role`)}</span>
+          </div>
+        </td>
         <td>${escapeHTML(host.public_id || '—')}</td>
         <td>${escapeHTML(`${host.os || '?'} / ${host.arch || '?'}`)}</td>
-        <td><span class="table-status ${host.status === 'online' ? 'is-online' : 'is-offline'}">${escapeHTML(host.status || 'unknown')}</span></td>
+        <td><span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span></td>
         <td>
-          <button
-            class="btn btn-secondary host-control-btn"
-            type="button"
-            data-target="${escapeHTML(host.public_id || host.id || '')}"
-            ${host.status === 'online' ? '' : 'disabled'}
-          >
-            <i class="fa-solid fa-tv"></i>
-            <span>Control</span>
-          </button>
+          <div class="host-table-actions">
+            <button
+              class="btn btn-secondary host-control-btn"
+              type="button"
+              data-target="${escapeHTML(host.public_id || host.id || '')}"
+              ${host.status === 'online' ? '' : 'disabled'}
+            >
+              <i class="fa-solid fa-tv"></i>
+              <span>Control</span>
+            </button>
+          </div>
         </td>
       </tr>
     `).join('');
@@ -763,19 +791,21 @@
               <span class="host-secondary-id">${escapeHTML(host.public_id || '—')}</span>
             </span>
           </strong>
-          <span class="table-status is-online">online</span>
+          <span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span>
         </div>
         <div class="overview-host-card-meta">
-          <span>${escapeHTML(`${host.os || '?'} / ${host.arch || '?'}`)}</span>
+          <span>${escapeHTML(`${hostRoleLabel(host)} role · ${host.os || '?'} / ${host.arch || '?'}`)}</span>
         </div>
-        <button
-          class="btn btn-secondary overview-host-action"
-          type="button"
-          data-target="${escapeHTML(host.public_id || host.id || '')}"
-        >
-          <i class="fa-solid fa-tv"></i>
-          <span>Control host</span>
-        </button>
+        <div class="overview-host-actions">
+          <button
+            class="btn btn-secondary overview-host-action"
+            type="button"
+            data-target="${escapeHTML(host.public_id || host.id || '')}"
+          >
+            <i class="fa-solid fa-tv"></i>
+            <span>Control host</span>
+          </button>
+        </div>
       </article>
     `).join('');
     bindHostControlActions();

@@ -5,27 +5,35 @@ services:
     working_dir: /app/unydesk/backend
     environment:
       UNYDESK_ASSETS: /app/unydesk/frontend/public
+      UNYDESK_PUBLIC_SERVER: http://192.168.3.5:8890
     command:
       - sh
       - -c
       - |
+        apk add --no-cache zip &&
         go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest &&
-        go mod tidy &&
         mkdir -p ./tmp/host-downloads &&
         rm -f ./cmd/unydesk-host/resource.syso &&
         cd ./cmd/unydesk-host &&
-        $(go env GOPATH)/bin/goversioninfo -64 -o resource.syso versioninfo.json &&
+        $(go env GOPATH)/bin/goversioninfo -64 -icon ../../../frontend/public/assets/favicon.ico -application-icon ../../../frontend/public/assets/favicon.ico -o resource.syso versioninfo.json &&
         cd /app/unydesk/backend &&
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-linux-amd64 ./cmd/unydesk-host &&
-        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-linux-arm64 ./cmd/unydesk-host &&
-        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-windows-amd64.exe ./cmd/unydesk-host &&
-        CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-windows-arm64.exe ./cmd/unydesk-host &&
-        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o ./tmp/host-downloads/unydesk-host-darwin-amd64 ./cmd/unydesk-host &&
-        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o ./tmp/host-downloads/unydesk-host-darwin-arm64 ./cmd/unydesk-host &&
+        HOST_LDFLAGS="-s -w -X main.defaultServerURL=$${UNYDESK_PUBLIC_SERVER}" &&
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-linux-amd64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-linux-arm64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H=windowsgui -X main.defaultServerURL=$${UNYDESK_PUBLIC_SERVER}" -o ./tmp/host-downloads/unydesk-host-windows-amd64.exe ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-s -w -H=windowsgui -X main.defaultServerURL=$${UNYDESK_PUBLIC_SERVER}" -o ./tmp/host-downloads/unydesk-host-windows-arm64.exe ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-darwin-amd64 ./cmd/unydesk-host &&
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-darwin-arm64 ./cmd/unydesk-host &&
         cd ./tmp/host-downloads &&
-        sha256sum unydesk-host-linux-amd64 unydesk-host-linux-arm64 unydesk-host-windows-amd64.exe unydesk-host-windows-arm64.exe unydesk-host-darwin-amd64 unydesk-host-darwin-arm64 > SHA256SUMS &&
+        zip -9 -q -j unydesk-host-linux-amd64.zip unydesk-host-linux-amd64 &&
+        zip -9 -q -j unydesk-host-linux-arm64.zip unydesk-host-linux-arm64 &&
+        zip -9 -q -j unydesk-host-windows-amd64.zip unydesk-host-windows-amd64.exe &&
+        zip -9 -q -j unydesk-host-windows-arm64.zip unydesk-host-windows-arm64.exe &&
+        zip -9 -q -j unydesk-host-macos-amd64.zip unydesk-host-darwin-amd64 &&
+        zip -9 -q -j unydesk-host-macos-arm64.zip unydesk-host-darwin-arm64 &&
+        sha256sum unydesk-host-linux-amd64 unydesk-host-linux-arm64 unydesk-host-windows-amd64.exe unydesk-host-windows-arm64.exe unydesk-host-darwin-amd64 unydesk-host-darwin-arm64 unydesk-host-linux-amd64.zip unydesk-host-linux-arm64.zip unydesk-host-windows-amd64.zip unydesk-host-windows-arm64.zip unydesk-host-macos-amd64.zip unydesk-host-macos-arm64.zip > SHA256SUMS &&
         cd /app/unydesk/backend &&
-        CGO_ENABLED=0 go build -o ./tmp/unydesk ./cmd/unydesk &&
+        CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o ./tmp/unydesk ./cmd/unydesk &&
         echo ">>> DEV frontend served from disk: $${UNYDESK_ASSETS}" &&
         ./tmp/unydesk
     restart: unless-stopped

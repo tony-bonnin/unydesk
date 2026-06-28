@@ -5,6 +5,8 @@ document.addEventListener('alpine:init', () => {
       name: 'UnyDesk',
       version: 'Loading…',
       public_id: 'Loading…',
+      host_ipv4: '',
+      client_ipv4: '',
       host_heartbeat_seconds: 35,
     },
     browserIdentity: {
@@ -12,6 +14,11 @@ document.addEventListener('alpine:init', () => {
       public_id: 'Loading…',
       token: '',
     },
+    standaloneTarget: '',
+    standalonePassword: '',
+    standaloneStatus: 'No account required. Open a standalone client in a new tab.',
+    standaloneBusy: false,
+    standaloneRegenActive: false,
     auth: {
       authenticated: false,
       user: null,
@@ -42,12 +49,12 @@ document.addEventListener('alpine:init', () => {
       meta: 'Waiting for browser detection.',
     },
     downloads: [
-      { title: 'Host for Linux amd64', description: 'Static bootstrap binary for Alpine-friendly deployments.', href: '/download/host/linux-amd64', secondary: false },
-      { title: 'Host for Linux arm64', description: 'Same host flow for ARM targets and lightweight edge nodes.', href: '/download/host/linux-arm64', secondary: false },
-      { title: 'Host for Windows amd64', description: 'Standard 64-bit Windows host binary for desktop and server editions.', href: '/download/host/windows-amd64', secondary: true },
-      { title: 'Host for Windows arm64', description: 'Windows on ARM build for newer ARM laptops and tablets.', href: '/download/host/windows-arm64', secondary: true },
-      { title: 'Host for macOS Intel', description: 'Darwin build for Intel-based Mac systems.', href: '/download/host/macos-amd64', secondary: true },
-      { title: 'Host for macOS Apple Silicon', description: 'Darwin build for Apple Silicon systems.', href: '/download/host/macos-arm64', secondary: true },
+      { title: 'Host for Linux amd64', description: 'Stripped static binary for Alpine-friendly deployments.', href: '/download/host/linux-amd64', archiveHref: '/download/host/linux-amd64.zip', secondary: false },
+      { title: 'Host for Linux arm64', description: 'Same host flow for ARM targets and lightweight edge nodes.', href: '/download/host/linux-arm64', archiveHref: '/download/host/linux-arm64.zip', secondary: false },
+      { title: 'Host for Windows amd64', description: 'Standard 64-bit Windows host binary for desktop and server editions.', href: '/download/host/windows-amd64', archiveHref: '/download/host/windows-amd64.zip', secondary: true },
+      { title: 'Host for Windows arm64', description: 'Windows on ARM build for newer ARM laptops and tablets.', href: '/download/host/windows-arm64', archiveHref: '/download/host/windows-arm64.zip', secondary: true },
+      { title: 'Host for macOS Intel', description: 'Darwin build for Intel-based Mac systems.', href: '/download/host/macos-amd64', archiveHref: '/download/host/macos-amd64.zip', secondary: true },
+      { title: 'Host for macOS Apple Silicon', description: 'Darwin build for Apple Silicon systems.', href: '/download/host/macos-arm64', archiveHref: '/download/host/macos-arm64.zip', secondary: true },
     ],
 
     async boot() {
@@ -58,14 +65,18 @@ document.addEventListener('alpine:init', () => {
       });
       await this.loadSession();
       await this.ensureBrowserIdentity();
+      this.ensureStandalonePassword();
+      this.applyPairedDownloads();
       await this.loadInfo();
-      await this.loadHosts();
       this.resolveDownloadChoice();
-      setInterval(() => this.loadHosts(), 2000);
     },
 
     browserTokenStorageKey() {
       return 'unydesk.browser.token';
+    },
+
+    standalonePasswordStorageKey() {
+      return 'unydesk.standalone.password';
     },
 
     async loadInfo() {
@@ -113,6 +124,91 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    generateStandalonePassword() {
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const size = 18;
+      if (window.crypto && window.crypto.getRandomValues) {
+        const raw = new Uint8Array(size);
+        window.crypto.getRandomValues(raw);
+        return Array.from(raw, (value) => alphabet[value % alphabet.length]).join('');
+      }
+      return Math.random().toString(36).slice(2, 20).toUpperCase();
+    },
+
+    ensureStandalonePassword() {
+      const current = window.sessionStorage.getItem(this.standalonePasswordStorageKey()) || '';
+      if (current) {
+        this.standalonePassword = current;
+        return;
+      }
+      this.standalonePassword = this.generateStandalonePassword();
+      window.sessionStorage.setItem(this.standalonePasswordStorageKey(), this.standalonePassword);
+    },
+
+    regenerateStandalonePassword() {
+      this.standaloneRegenActive = true;
+      this.standalonePassword = this.generateStandalonePassword();
+      window.sessionStorage.setItem(this.standalonePasswordStorageKey(), this.standalonePassword);
+      this.standaloneStatus = 'Ephemeral client password regenerated.';
+      window.setTimeout(() => {
+        this.standaloneRegenActive = false;
+      }, 650);
+    },
+
+    async openStandaloneClient() {
+      const target = `${this.standaloneTarget || ''}`.trim();
+      if (!target) {
+        this.standaloneStatus = 'Enter a target host ID or hostname first.';
+        return;
+      }
+      if (!this.browserIdentity.public_id || this.browserIdentity.public_id === 'Loading…') {
+        this.standaloneStatus = 'Client identity is still loading.';
+        return;
+      }
+      if (!this.standalonePassword) {
+        this.ensureStandalonePassword();
+      }
+
+      this.standaloneBusy = true;
+      this.standaloneStatus = 'Preparing standalone session...';
+      try {
+        const response = await fetch('/api/v1/standalone/session', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': this.csrfToken,
+          },
+          body: JSON.stringify({
+            target,
+            viewer: this.browserIdentity.public_id,
+            password: this.standalonePassword,
+          }),
+        });
+        this.captureCSRF(response);
+        const data = await response.json();
+        if (!response.ok) {
+          this.standaloneStatus = data.error || 'Unable to open a standalone session right now.';
+          return;
+        }
+
+        const url = new URL('/connect/', window.location.origin);
+        url.searchParams.set('session', data.id);
+        url.hash = new URLSearchParams({ standalone: this.standalonePassword }).toString();
+
+        const opened = window.open(url.toString(), '_blank', 'noopener');
+        this.standaloneStatus = opened
+          ? `Standalone session ${data.id} opened in a new tab.`
+          : 'Popup blocked. Opening standalone client in this tab instead.';
+        if (!opened) {
+          window.location.assign(url.toString());
+        }
+      } catch (error) {
+        this.standaloneStatus = 'Unable to open a standalone session right now.';
+      } finally {
+        this.standaloneBusy = false;
+      }
+    },
+
     async loadHosts() {
       try {
         const response = await fetch('/api/v1/hosts');
@@ -129,12 +225,79 @@ document.addEventListener('alpine:init', () => {
       return window.location.host || '127.0.0.1:8890';
     },
 
+    hostIP() {
+      if (this.info.host_ipv4) return this.info.host_ipv4;
+      const host = this.directAddress();
+      if (!host) return '127.0.0.1';
+      if (host.startsWith('[')) {
+        const end = host.indexOf(']');
+        return end > 0 ? host.slice(1, end) : host;
+      }
+      return host.split(':')[0] || host;
+    },
+
+    hostIPDisplay(limit = 18) {
+      return this.truncateAddress(this.hostIP(), limit);
+    },
+
+    clientIP() {
+      return this.info.client_ipv4 || this.hostIP();
+    },
+
+    clientIPDisplay(limit = 18) {
+      return this.truncateAddress(this.clientIP(), limit);
+    },
+
+    directAddressDisplay(limit = 28) {
+      return this.truncateAddress(this.directAddress(), limit);
+    },
+
     directServerURL() {
       return window.location.origin || 'http://127.0.0.1:8890';
     },
 
+    truncateMiddle(value, limit = 28) {
+      const text = `${value || ''}`;
+      const separator = '...';
+      if (!text || text.length <= limit) return text;
+
+      const tail = Math.min(10, Math.max(6, Math.floor(limit / 3)));
+      const head = Math.max(8, limit - tail - separator.length);
+      if (head + tail + separator.length >= text.length) return text;
+
+      return `${text.slice(0, head)}${separator}${text.slice(-tail)}`;
+    },
+
+    truncateAddress(value, limit = 22) {
+      const text = `${value || ''}`.trim();
+      if (!text || text.length <= limit) return text;
+      if (limit <= 3) return text.slice(0, limit);
+      return `${text.slice(0, limit - 3)}...`;
+    },
+
     exampleCommand() {
-      return `unydesk-host --server ${this.directServerURL()} --no-pause`;
+      const installID = this.browserIdentity.install_id || '';
+      if (!installID) return `unydesk-host --server ${this.directServerURL()} --no-pause`;
+      return `unydesk-host --server ${this.directServerURL()} --install-id ${installID} --no-pause`;
+    },
+
+    pairedDownloadHref(href) {
+      try {
+        const url = new URL(href, window.location.origin);
+        if (this.browserIdentity.install_id) {
+          url.searchParams.set('install_id', this.browserIdentity.install_id);
+        }
+        return `${url.pathname}${url.search}`;
+      } catch (error) {
+        return href;
+      }
+    },
+
+    applyPairedDownloads() {
+      this.downloads = this.downloads.map((item) => ({
+        ...item,
+        href: this.pairedDownloadHref(item.href),
+      }));
     },
 
     downloadTitle() {
@@ -239,7 +402,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     choice(href, label, cta, meta) {
-      return { href, label, cta, meta };
+      return { href: this.pairedDownloadHref(href), label, cta, meta };
     },
 
     openLogin() {

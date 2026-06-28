@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UnyDesk | Fast Access</title>
+  <title>UnyDesk | SelfHosted Free Access</title>
   <meta name="theme-color" content="#3e3aab">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
   <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
@@ -23,7 +23,6 @@
           <a class="account-btn" href="/account" :title="'Open account for ' + auth.user.email">
             <i class="fa-solid fa-circle-user"></i>
             <span x-text="auth.user.display_name || auth.user.email"></span>
-            <i class="bi bi-chevron-right"></i>
           </a>
         </template>
         <template x-if="!auth.authenticated">
@@ -39,7 +38,7 @@
     <section class="hero">
       <div>
         <div class="eyebrow"><span>#</span>TRINITY Labs Remote Access</div>
-        <h1 class="slogan">Fast Access</h1>
+        <h1 class="slogan">Free Remote Access</h1>
         <p>
           A lightweight remote-control broker built in Go for Alpine Linux, musl-friendly deployment,
           and clean future integration with UnyPort. You can expose this instance through a generated
@@ -47,12 +46,14 @@
         </p>
         <div class="stats-strip">
           <div class="stat-block">
-            <span class="stat-kicker">Access ID</span>
-            <span class="stat-value brand" x-text="browserIdentity.public_id"></span>
+            <span class="stat-kicker">Client IP</span>
+            <span class="stat-value brand" x-text="clientIPDisplay()" :title="clientIP()"></span>
           </div>
           <div class="stat-block">
             <span class="stat-kicker">Direct Address</span>
-            <span class="stat-value"><code x-text="directAddress()"></code></span>
+            <span class="stat-value">
+              <code class="direct-address-inline" x-text="directAddressDisplay(18)" :title="directAddress()"></code>
+            </span>
           </div>
           <div class="stat-block">
             <span class="stat-kicker">Runtime</span>
@@ -78,14 +79,17 @@
             </div>
           </div>
           <div class="identity">
-            <div class="identity-label">Direct Address</div>
+            <div class="identity-label">Ephemeral Client Password</div>
             <div class="identity-row">
-              <div class="identity-code direct-address-code" x-text="directAddress()"></div>
-              <div class="copy-controls">
-                <button class="copy-btn" type="button" @click="copy(directAddress(), 'address')" aria-label="Copy address" title="Copy address">
+              <div class="identity-code direct-address-code standalone-password-code" x-text="standalonePassword"></div>
+              <div class="copy-controls standalone-password-controls">
+                <button class="copy-btn standalone-regen-btn" type="button" @click="regenerateStandalonePassword()" aria-label="Regenerate standalone password" title="Regenerate standalone password">
+                  <i class="fa-solid fa-arrows-rotate" :class="{ 'is-spinning': standaloneRegenActive }"></i>
+                </button>
+                <button class="copy-btn" type="button" @click="copy(standalonePassword, 'standalone-password')" aria-label="Copy standalone password" title="Copy standalone password">
                   <i class="bi bi-copy"></i>
                 </button>
-                <span class="copy-feedback" :class="{ show: copiedField === 'address' }">Address copied!</span>
+                <span class="copy-feedback" :class="{ show: copiedField === 'standalone-password' }">Password copied!</span>
               </div>
             </div>
           </div>
@@ -110,38 +114,32 @@
             Windows builds include metadata and <code>SHA256</code> checksums. SmartScreen warnings may still appear until code signing is enabled.
           </div>
           <div class="download-note">
-            Quick host test:<br>
+            Quick host test:
             <code x-text="exampleCommand()"></code>
           </div>
         </div>
 
-        <div class="connection-mode-card">
+        <div class="standalone-card">
           <div class="connection-mode-head">
-            <strong>Supported Connection Modes</strong>
-            <span>Choose the path that fits your environment and security model.</span>
+            <strong>Standalone Client</strong>
+            <span>Open a direct viewer from this landing page with your local client ID and an ephemeral password.</span>
           </div>
-          <div class="connection-mode-grid">
-            <div class="connection-mode-item">
-              <i class="fa-solid fa-id-badge"></i>
-              <div>
-                <strong>UnyDesk ID</strong>
-                <span>Browser-first access using a persistent public identifier.</span>
-              </div>
+          <div class="standalone-form">
+            <label class="auth-label">
+              <span><i class="fa-solid fa-tv"></i> Client ID</span>
+              <input class="auth-input" type="text" :value="browserIdentity.public_id" readonly>
+            </label>
+            <label class="auth-label">
+              <span><i class="bi bi-broadcast-pin"></i> Target Host ID</span>
+              <input class="auth-input" type="text" placeholder="097 845 659 or host name" x-model="standaloneTarget" @keydown.enter="openStandaloneClient()">
+            </label>
+            <div class="session-inline-actions standalone-actions">
+              <button class="btn btn-primary" type="button" @click="openStandaloneClient()" :disabled="standaloneBusy">
+                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                <span x-text="standaloneBusy ? 'Opening...' : 'Open standalone client'"></span>
+              </button>
             </div>
-            <div class="connection-mode-item">
-              <i class="fa-solid fa-network-wired"></i>
-              <div>
-                <strong>Direct IP:Port</strong>
-                <span>Best for trusted LAN environments and direct routing.</span>
-              </div>
-            </div>
-            <div class="connection-mode-item">
-              <i class="fa-solid fa-download"></i>
-              <div>
-                <strong>Host Binary</strong>
-                <span>Use the installed agent when persistent remote presence is required.</span>
-              </div>
-            </div>
+            <div class="session-status-line standalone-status-line" x-text="standaloneStatus"></div>
           </div>
         </div>
       </aside>
@@ -170,7 +168,10 @@
                 <strong x-text="item.title"></strong>
                 <span x-text="item.description"></span>
               </div>
-              <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">Download</a>
+              <div class="download-actions">
+                <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">Download</a>
+                <a class="download-link secondary" x-show="item.archiveHref" :href="item.archiveHref">ZIP</a>
+              </div>
             </div>
           </template>
         </div>
@@ -197,20 +198,20 @@
         <button class="modal-close" type="button" @click="closeLogin()">Close</button>
       </div>
       <div class="modal-body">
-        <div class="auth-form">
+        <form class="auth-form" autocomplete="on" @submit.prevent="submitAuth()">
           <label class="auth-label">
             <span><i class="bi bi-envelope"></i> Email</span>
-            <input class="auth-input" type="email" placeholder="admin@example.com" x-model="authForm.email" @keydown.enter="submitAuth()">
+            <input class="auth-input" id="login-email" name="email" type="email" placeholder="admin@example.com" x-model="authForm.email" autocomplete="username email" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" @keydown.enter="submitAuth()">
           </label>
           <label class="auth-label">
             <span><i class="bi bi-key"></i> Password</span>
-            <input class="auth-input" type="password" placeholder="Password" x-model="authForm.password" @keydown.enter="submitAuth()">
+            <input class="auth-input" id="login-password" name="password" type="password" placeholder="Password" x-model="authForm.password" autocomplete="current-password" @keydown.enter="submitAuth()">
           </label>
-          <button class="btn btn-primary auth-submit" type="button" @click="submitAuth()">
+          <button class="btn btn-primary auth-submit" type="submit">
             <i class="fa-solid fa-right-to-bracket"></i>
             <span>Sign In</span>
           </button>
-        </div>
+        </form>
         <div class="auth-error" x-show="authError" x-text="authError"></div>
       </div>
     </div>

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,13 +18,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v4"
 )
+
+var defaultServerURL = ""
+var defaultInstallID = ""
 
 type hostInfo struct {
 	Name    string `json:"name"`
@@ -35,12 +38,14 @@ type hostInfo struct {
 }
 
 type registerResponse struct {
-	Type     string                `json:"type"`
-	ID       string                `json:"host_id"`
-	PublicID string                `json:"public_id"`
-	Action   string                `json:"action"`
-	Sessions []hostSessionDispatch `json:"sessions"`
-	Error    string                `json:"error"`
+	Type      string                `json:"type"`
+	ID        string                `json:"host_id"`
+	PublicID  string                `json:"public_id"`
+	SessionID string                `json:"session_id"`
+	Action    string                `json:"action"`
+	Payload   json.RawMessage       `json:"payload"`
+	Sessions  []hostSessionDispatch `json:"sessions"`
+	Error     string                `json:"error"`
 }
 
 type hostSessionDispatch struct {
@@ -60,6 +65,12 @@ type hostIdentity struct {
 	PublicID  string
 }
 
+type bootstrapConfig struct {
+	Server    string `json:"server"`
+	InstallID string `json:"install_id"`
+	PublicID  string `json:"public_id,omitempty"`
+}
+
 type sessionSnapshot struct {
 	ID                  string   `json:"id"`
 	Target              string   `json:"target"`
@@ -69,12 +80,52 @@ type sessionSnapshot struct {
 	AnswerSDP           string   `json:"answer_sdp"`
 	ViewerICECandidates []string `json:"viewer_ice_candidates"`
 	HostICECandidates   []string `json:"host_ice_candidates"`
+	ScreenDataURL       string   `json:"screen_data_url"`
+	ScreenCaptureError  string   `json:"screen_capture_error"`
+}
+
+type incomingFileTransfer struct {
+	ID                string
+	Name              string
+	DeclaredSize      int64
+	ReceivedBytes     int64
+	NextChunkIndex    int
+	TempPath          string
+	DestinationDir    string
+	DestinationPath   string
+	File              *os.File
+	LastProgressAt    time.Time
+	LastProgressBytes int64
+}
+
+var (
+	fileTransferMu    sync.Mutex
+	incomingTransfers = make(map[string]*incomingFileTransfer)
+	hostAccessMu      sync.RWMutex
+	hostAccessEnabled = true
+)
+
+func currentHostAccessEnabled() bool {
+	hostAccessMu.RLock()
+	defer hostAccessMu.RUnlock()
+	return hostAccessEnabled
+}
+
+func setHostAccessEnabled(enabled bool) {
+	hostAccessMu.Lock()
+	hostAccessEnabled = enabled
+	hostAccessMu.Unlock()
+	localHostUI.setAccessEnabled(enabled)
 }
 
 func main() {
 	jsonMode := flag.Bool("json", false, "print machine-readable output")
+	diagnoseMode := flag.Bool("diagnose", false, "run host diagnostics and exit")
+	elevateMode := flag.Bool("elevate", false, "on Windows, relaunch as administrator when needed")
 	noPause := flag.Bool("no-pause", false, "do not wait for Enter before exit")
+	consoleMode := flag.Bool("console", false, "show the legacy console window on Windows instead of tray mode")
 	serverURL := flag.String("server", "", "register this host against an UnyDesk server, for example http://127.0.0.1:8890")
+	installIDFlag := flag.String("install-id", "", "force the install identity used by this host")
 	flag.Parse()
 
 	info := hostInfo{
@@ -83,7 +134,7 @@ func main() {
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,
 		Status:  "bootstrap",
-		Next:    "Host tunnel, screen capture, and input control will be added next.",
+		Next:    "Remote fabric with adaptive H.264 WebRTC and transport fallbacks is active.",
 	}
 
 	if *jsonMode {
@@ -91,18 +142,59 @@ func main() {
 		return
 	}
 
-	printBanner(info)
-	if *serverURL != "" {
+	if *elevateMode && runtime.GOOS == "windows" && !processHasAdminRights() {
+		if err := relaunchProcessElevated(); err != nil {
+			fmt.Printf("Elevation failed: %v\n", err)
+			if *consoleMode && !*noPause {
+				waitForEnter()
+			}
+		}
+		return
+	}
+
+	windowsTrayMode := runtime.GOOS == "windows" && !*consoleMode
+	if windowsTrayMode {
+		if logFile, logPath, err := startHostFileLogging(); err == nil {
+			defer logFile.Close()
+			fmt.Printf("\n--- UnyDesk Host start %s ---\n", time.Now().Format(time.RFC3339))
+			fmt.Printf("Log file: %s\n", logPath)
+		}
+		hideConsoleWindow()
+	}
+
+	sidecar := loadBootstrapConfigFromSidecar()
+	resolvedServerURL, serverSource := resolveServerURL(*serverURL, sidecar)
+	if *diagnoseMode {
+		if !windowsTrayMode {
+			printBanner(info)
+		}
+		runHostDiagnostics(resolvedServerURL, serverSource, resolveInstallIDOverride(*installIDFlag, sidecar), info)
+		if runtime.GOOS == "windows" && *consoleMode && !*noPause {
+			waitForEnter()
+		}
+		return
+	}
+
+	if !windowsTrayMode {
+		printBanner(info)
+	}
+	if resolvedServerURL != "" {
+		if serverSource != "" {
+			fmt.Printf("Server source : %s\n", serverSource)
+			fmt.Printf("Server target : %s\n", resolvedServerURL)
+			fmt.Println()
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 
-		if err := runPersistentHost(ctx, *serverURL, info); err != nil && ctx.Err() == nil {
+		autoOpenUI := runtime.GOOS == "windows" && !windowsTrayMode && !*noPause
+		if err := runPersistentHost(ctx, stop, resolvedServerURL, info, resolveInstallIDOverride(*installIDFlag, sidecar), autoOpenUI, windowsTrayMode); err != nil && ctx.Err() == nil {
 			fmt.Println()
 			fmt.Printf("Registration error: %v\n", err)
 		}
 	}
 
-	if runtime.GOOS == "windows" && !*noPause {
+	if runtime.GOOS == "windows" && *consoleMode && !*noPause {
 		waitForEnter()
 	}
 }
@@ -126,27 +218,224 @@ func printBanner(info hostInfo) {
 	fmt.Printf("System  : %s/%s\n", info.OS, info.Arch)
 	fmt.Printf("Status  : %s\n", info.Status)
 	fmt.Println()
-	fmt.Println("This binary is currently a bootstrap utility.")
-	fmt.Println("It validates the download and target platform, and can now")
-	fmt.Println("open a resilient WebSocket registration channel to an UnyDesk server.")
-	fmt.Println()
-	fmt.Println("Next step planned:")
-	fmt.Printf("- %s\n", info.Next)
+	fmt.Println("This binary now uses an outbound control tunnel plus a")
+	fmt.Println("remote fabric for screen capture, video encoding, and")
+	fmt.Println("transport fallback selection.")
 	fmt.Println()
 	fmt.Println("Available options:")
 	fmt.Println("- --json     print machine-readable output")
+	fmt.Println("- --diagnose run host diagnostics and exit")
+	fmt.Println("- --elevate  relaunch as administrator on Windows")
 	fmt.Println("- --server   connect this host to an UnyDesk server over WebSocket")
+	fmt.Println("- --console  keep the legacy Windows console window instead of tray mode")
 	fmt.Println("- --no-pause exit immediately on Windows")
 }
 
-func runPersistentHost(ctx context.Context, serverURL string, info hostInfo) error {
+func resolveServerURL(flagValue string, sidecar bootstrapConfig) (string, string) {
+	if value := strings.TrimSpace(flagValue); value != "" {
+		return value, "command line"
+	}
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_SERVER")); value != "" {
+		return value, "environment"
+	}
+	if value := strings.TrimSpace(sidecar.Server); value != "" {
+		return value, "sidecar config"
+	}
+	if value := strings.TrimSpace(defaultServerURL); value != "" {
+		return value, "embedded default"
+	}
+	return "", ""
+}
+
+func loadBootstrapConfigFromSidecar() bootstrapConfig {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return bootstrapConfig{}
+	}
+	baseDir := filepath.Dir(executablePath)
+	candidates := []string{
+		filepath.Join(baseDir, "unydesk-host.json"),
+		filepath.Join(baseDir, "unydesk-host.txt"),
+		filepath.Join(baseDir, "server.txt"),
+	}
+	for _, path := range candidates {
+		if value, ok := readBootstrapConfigFile(path); ok {
+			return value
+		}
+	}
+	return bootstrapConfig{}
+}
+
+func readBootstrapConfigFile(path string) (bootstrapConfig, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return bootstrapConfig{}, false
+	}
+	raw := strings.TrimSpace(string(data))
+	if raw == "" {
+		return bootstrapConfig{}, false
+	}
+	if strings.HasPrefix(raw, "{") {
+		var payload bootstrapConfig
+		if err := json.Unmarshal(data, &payload); err == nil {
+			payload.Server = strings.TrimSpace(payload.Server)
+			payload.InstallID = strings.TrimSpace(payload.InstallID)
+			payload.PublicID = strings.TrimSpace(payload.PublicID)
+			return payload, payload.Server != "" || payload.InstallID != "" || payload.PublicID != ""
+		}
+	}
+	return bootstrapConfig{Server: raw}, true
+}
+
+func resolveInstallIDOverride(flagValue string, sidecar bootstrapConfig) string {
+	if value := strings.TrimSpace(flagValue); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_INSTALL_ID")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(sidecar.InstallID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(defaultInstallID); value != "" {
+		return value
+	}
+	return ""
+}
+
+func runHostDiagnostics(serverURL, serverSource, installIDOverride string, info hostInfo) {
+	fmt.Println()
+	fmt.Println("UnyDesk Host diagnostics")
+	fmt.Println("------------------------")
+	fmt.Printf("Version : %s\n", info.Version)
+	fmt.Printf("System  : %s/%s\n", info.OS, info.Arch)
+	if runtime.GOOS == "windows" {
+		fmt.Printf("Admin   : %t\n", processHasAdminRights())
+	}
+	if hostname, err := os.Hostname(); err == nil {
+		fmt.Printf("Hostname: %s\n", hostname)
+	}
+
+	installID, err := loadOrCreateInstallID(installIDOverride)
+	if err != nil {
+		fmt.Printf("Install ID: FAIL (%v)\n", err)
+	} else {
+		fmt.Printf("Install ID: OK (%s)\n", installID)
+	}
+
+	if strings.TrimSpace(serverURL) == "" {
+		fmt.Println("Server  : SKIP (no --server, UNYDESK_SERVER, sidecar, or embedded default)")
+	} else {
+		if strings.TrimSpace(serverSource) != "" {
+			fmt.Printf("Server source: %s\n", serverSource)
+		}
+		fmt.Printf("Server target: %s\n", serverURL)
+		diagnoseHTTP("healthz", strings.TrimRight(normalizeServerHTTPURL(serverURL), "/")+"/healthz")
+		diagnoseHTTP("info", strings.TrimRight(normalizeServerHTTPURL(serverURL), "/")+"/api/v1/info")
+	}
+
+	started := time.Now()
+	capture := defaultCaptureProvider()
+	img, captureErr := capture.CapturePrimaryDisplay()
+	if captureErr != nil {
+		fmt.Printf("Screen capture: FAIL (%s, %v)\n", capture.Name(), captureErr)
+	} else {
+		bounds := img.Bounds()
+		fmt.Printf("Screen capture: OK (%s, %dx%d in %s)\n", capture.Name(), bounds.Dx(), bounds.Dy(), time.Since(started).Round(time.Millisecond))
+	}
+
+	ffmpegPath, ffmpegOK := lookupFFmpegBinary()
+	if ffmpegOK {
+		fmt.Printf("FFmpeg : OK (%s)\n", ffmpegPath)
+	} else {
+		fmt.Println("FFmpeg : FAIL (H.264 WebRTC video disabled until ffmpeg is available)")
+	}
+	profiles := h264AdaptiveProfiles()
+	if len(profiles) > 0 {
+		policy := remoteFabricPolicyFor(ffmpegPath, profiles[0], capture)
+		fmt.Printf("Fabric capture : %s [%s/%s]\n", policy.CaptureProvider, policy.CaptureKind, policy.CaptureStatus)
+		fmt.Printf("Fabric encoder : %s [%s/%s/%s]\n", policy.EncoderProvider, policy.EncoderCodec, policy.EncoderMode, policy.EncoderStatus)
+		fmt.Printf("Fabric transport: %s [%s], fallback=%s\n", policy.TransportPrimary, policy.TransportStatus, policy.TransportFallback)
+		fmt.Printf("Fabric caps     : capture=%s\n", policy.CaptureCapabilities)
+		fmt.Printf("Fabric caps     : encoder=%s\n", policy.EncoderCapabilities)
+		fmt.Printf("Fabric caps     : transport=%s\n", policy.TransportCapabilities)
+	}
+}
+
+func normalizeServerHTTPURL(serverURL string) string {
+	serverURL = strings.TrimSpace(serverURL)
+	if serverURL == "" {
+		return ""
+	}
+	if !strings.Contains(serverURL, "://") {
+		return "http://" + serverURL
+	}
+	if strings.HasPrefix(serverURL, "ws://") {
+		return "http://" + strings.TrimPrefix(serverURL, "ws://")
+	}
+	if strings.HasPrefix(serverURL, "wss://") {
+		return "https://" + strings.TrimPrefix(serverURL, "wss://")
+	}
+	return serverURL
+}
+
+func diagnoseHTTP(label, endpoint string) {
+	client := http.Client{Timeout: 5 * time.Second}
+	started := time.Now()
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		fmt.Printf("HTTP %-7s: FAIL (%v)\n", label, err)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Printf("HTTP %-7s: FAIL (%s in %s)\n", label, resp.Status, time.Since(started).Round(time.Millisecond))
+		return
+	}
+	fmt.Printf("HTTP %-7s: OK (%s in %s)\n", label, resp.Status, time.Since(started).Round(time.Millisecond))
+}
+
+func startHostFileLogging() (*os.File, string, error) {
+	path := hostLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, "", err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, "", err
+	}
+	os.Stdout = file
+	os.Stderr = file
+	return file, path, nil
+}
+
+func hostLogPath() string {
+	if runtime.GOOS == "windows" {
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			return filepath.Join(programData, "UnyDesk", "unydesk-host.log")
+		}
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, "UnyDesk", "unydesk-host.log")
+	}
+	return filepath.Join(".", "unydesk-host.log")
+}
+
+func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverURL string, info hostInfo, preferredInstallID string, autoOpenUI bool, trayMode bool) error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
-	installID, err := loadOrCreateInstallID()
+	installID, err := loadOrCreateInstallID(preferredInstallID)
 	if err != nil {
 		return err
+	}
+	setHostAccessEnabled(true)
+	localHostUI.setBootstrap(info, hostname, serverURL, installID)
+	startLocalHostUI(ctx, autoOpenUI)
+	if trayMode {
+		startLocalHostTray(ctx, shutdown)
 	}
 
 	wsURL, err := toWebSocketURL(serverURL)
@@ -172,6 +461,7 @@ func runPersistentHost(ctx context.Context, serverURL string, info hostInfo) err
 		fmt.Println()
 		fmt.Printf("Connection lost: %v\n", err)
 		fmt.Printf("Reconnecting in %s...\n", backoff)
+		localHostUI.setDisconnected(err, backoff)
 
 		select {
 		case <-ctx.Done():
@@ -189,21 +479,34 @@ func runPersistentHost(ctx context.Context, serverURL string, info hostInfo) err
 }
 
 func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, info hostInfo, identity *hostIdentity) error {
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = true
+	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	conn.EnableWriteCompression(true)
+	_ = conn.SetCompressionLevel(flate.BestSpeed)
 
-	if err := conn.WriteJSON(map[string]any{
+	var writeMu sync.Mutex
+	writeJSON := func(v any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(v)
+	}
+
+	if err := writeJSON(map[string]any{
 		"type": "register",
-		"host": map[string]string{
-			"install_id": identity.InstallID,
-			"name":       info.Name,
-			"os":         info.OS,
-			"arch":       info.Arch,
-			"version":    info.Version,
-			"hostname":   hostname,
+		"host": map[string]any{
+			"install_id":     identity.InstallID,
+			"role":           "host",
+			"access_enabled": currentHostAccessEnabled(),
+			"name":           info.Name,
+			"os":             info.OS,
+			"arch":           info.Arch,
+			"version":        info.Version,
+			"hostname":       hostname,
 		},
 	}); err != nil {
 		return err
@@ -214,7 +517,7 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 		return err
 	}
 	if registered.Type == "error" {
-		return fmt.Errorf(registered.Error)
+		return fmt.Errorf("%s", registered.Error)
 	}
 	if registered.Type != "registered" {
 		return fmt.Errorf("unexpected websocket response %q", registered.Type)
@@ -230,6 +533,8 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	firstConnect := identity.HostID == ""
 	identity.HostID = registered.ID
 	identity.PublicID = registered.PublicID
+	accountURL := linkedAccountURL(serverURL, identity.InstallID, registered.PublicID)
+	localHostUI.setConnected(*identity, accountURL)
 
 	fmt.Println()
 	if firstConnect {
@@ -244,263 +549,643 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	fmt.Printf("Public ID : %s\n", registered.PublicID)
 	fmt.Printf("Install ID : %s\n", identity.InstallID)
 	fmt.Println("Transport : WebSocket")
+	if linkURL := accountURL; linkURL != "" {
+		fmt.Printf("Browser link : %s\n", linkURL)
+	}
 	fmt.Println()
 	fmt.Println("Heartbeat loop started. Press Ctrl+C to stop.")
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	activeSessions := make(map[string]struct{})
+	activeSessions := make(map[string]chan struct{})
 	var activeMu sync.Mutex
+	defer func() {
+		activeMu.Lock()
+		defer activeMu.Unlock()
+		for _, stop := range activeSessions {
+			close(stop)
+		}
+	}()
 
-	processHeartbeat := func() error {
-		if err := conn.WriteJSON(map[string]string{"type": "heartbeat"}); err != nil {
-			return fmt.Errorf("heartbeat send failed: %w", err)
+	startSessionRealtime := func(sessionID string) {
+		activeMu.Lock()
+		if _, exists := activeSessions[sessionID]; exists {
+			activeMu.Unlock()
+			return
 		}
-		var ack registerResponse
-		if err := conn.ReadJSON(&ack); err != nil {
-			return fmt.Errorf("heartbeat read failed: %w", err)
-		}
-		if ack.Type == "error" {
-			return fmt.Errorf(ack.Error)
-		}
-		fmt.Printf("[%s] heartbeat ok for %s\n", time.Now().Format("15:04:05"), registered.PublicID)
-		for _, session := range ack.Sessions {
-			fmt.Println()
-			fmt.Println("Incoming control request")
-			fmt.Println("------------------------")
-			fmt.Printf("Session  : %s\n", session.ID)
-			fmt.Printf("Viewer   : %s\n", session.Viewer)
-			fmt.Printf("Target   : %s\n", session.Target)
-			fmt.Printf("Host     : %s (%s)\n", session.RoutedHostname, session.RoutedHostPublicID)
-			fmt.Printf("Created  : %s\n", session.CreatedAt.Local().Format(time.RFC1123))
-			fmt.Printf("Status   : %s\n", session.Status)
-			fmt.Println("Next     : screen stream and input channel wiring will attach here.")
-			if err := conn.WriteJSON(map[string]string{
+		stop := make(chan struct{})
+		activeSessions[sessionID] = stop
+		activeMu.Unlock()
+
+		sessionURL := strings.TrimRight(serverURL, "/") + "/api/v1/sessions/" + url.PathEscape(sessionID)
+		go func() {
+			defer func() {
+				activeMu.Lock()
+				delete(activeSessions, sessionID)
+				activeMu.Unlock()
+			}()
+			runWebRTCSession(ctx, stop, sessionURL, sessionID)
+		}()
+	}
+
+	handleDispatch := func(session hostSessionDispatch) error {
+		fmt.Println()
+		fmt.Println("Incoming control request")
+		fmt.Println("------------------------")
+		fmt.Printf("Session  : %s\n", session.ID)
+		fmt.Printf("Viewer   : %s\n", session.Viewer)
+		fmt.Printf("Target   : %s\n", session.Target)
+		fmt.Printf("Host     : %s (%s)\n", session.RoutedHostname, session.RoutedHostPublicID)
+		fmt.Printf("Created  : %s\n", session.CreatedAt.Local().Format(time.RFC1123))
+		fmt.Printf("Status   : %s\n", session.Status)
+		fmt.Println("Next     : pure WebSocket control is active on this host.")
+		localHostUI.noteSession(session)
+		if !currentHostAccessEnabled() {
+			fmt.Println("Access   : paused locally, refusing new client session.")
+			if err := writeJSON(map[string]string{
 				"type":       "session_ack",
 				"session_id": session.ID,
-				"action":     "accept",
+				"action":     "busy",
 			}); err != nil {
-				return fmt.Errorf("session ack send failed: %w", err)
+				return fmt.Errorf("session busy send failed: %w", err)
 			}
-			var sessionAck registerResponse
-			if err := conn.ReadJSON(&sessionAck); err != nil {
-				return fmt.Errorf("session ack read failed: %w", err)
-			}
-			if sessionAck.Type == "error" {
-				return fmt.Errorf(sessionAck.Error)
-			}
-			fmt.Printf("Acked    : %s (%s)\n", session.ID, sessionAck.Action)
-			activeMu.Lock()
-			_, exists := activeSessions[session.ID]
-			if !exists {
-				activeSessions[session.ID] = struct{}{}
-			}
-			activeMu.Unlock()
-			if exists {
-				continue
-			}
-			go func(sessionID string) {
-				defer func() {
-					activeMu.Lock()
-					delete(activeSessions, sessionID)
-					activeMu.Unlock()
-				}()
-				if err := establishHostAnswer(ctx, serverURL, sessionID); err != nil && ctx.Err() == nil {
-					fmt.Printf("Host signaling error for %s: %v\n", sessionID, err)
-				}
-			}(session.ID)
+			return nil
 		}
+		fmt.Println("Access   : auto-accepted; local confirmation is temporarily disabled.")
+		if err := writeJSON(map[string]string{
+			"type":       "session_ack",
+			"session_id": session.ID,
+			"action":     "accept",
+		}); err != nil {
+			return fmt.Errorf("session ack send failed: %w", err)
+		}
+		startSessionRealtime(session.ID)
 		return nil
 	}
 
-	if err := processHeartbeat(); err != nil {
-		return err
-	}
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if err := processHeartbeat(); err != nil {
-				return err
-			}
+		sendHeartbeat := func() error {
+			return writeJSON(map[string]any{
+				"type": "heartbeat",
+				"payload": map[string]any{
+					"role":           "host",
+					"access_enabled": currentHostAccessEnabled(),
+				},
+			})
 		}
-	}
-}
 
-func establishHostAnswer(ctx context.Context, serverURL, sessionID string) error {
-	sessionURL := strings.TrimRight(serverURL, "/") + "/api/v1/sessions/" + url.PathEscape(sessionID)
-	answerURL := sessionURL + "/answer"
-	candidatesURL := sessionURL + "/candidates"
-
-	session, err := waitForSessionOffer(ctx, sessionURL, sessionID, 3*time.Minute)
-	if err != nil {
-		return err
-	}
-
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
-	})
-	if err != nil {
-		return err
-	}
-	defer pc.Close()
-	done := make(chan struct{})
-	var doneOnce sync.Once
-	stop := func() {
-		doneOnce.Do(func() {
-			close(done)
-		})
-	}
-
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		fmt.Printf("Host data channel announced for %s: %s\n", sessionID, dc.Label())
-		dc.OnOpen(func() {
-			fmt.Printf("Host data channel open for %s\n", sessionID)
-		})
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			var payload map[string]any
-			if err := json.Unmarshal(msg.Data, &payload); err != nil {
-				_ = dc.SendText(`{"type":"error","message":"invalid json"}`)
-				return
-			}
-			switch strings.TrimSpace(fmt.Sprint(payload["type"])) {
-			case "hello":
-				_ = dc.SendText(fmt.Sprintf(`{"type":"hello_ack","session_id":"%s","host_id":"%s","host_public_id":"%s"}`, sessionID, "", ""))
-			case "ping":
-				_ = dc.SendText(fmt.Sprintf(`{"type":"pong","session_id":"%s","sent_at":%q,"received_at":%q}`, sessionID, fmt.Sprint(payload["sent_at"]), time.Now().UTC().Format(time.RFC3339Nano)))
-			case "mouse_move":
-				fmt.Printf("Host input %s mouse_move x=%v y=%v\n", sessionID, payload["x"], payload["y"])
-			case "mouse_click":
-				fmt.Printf("Host input %s mouse_click button=%v x=%v y=%v\n", sessionID, payload["button"], payload["x"], payload["y"])
-			case "key_down":
-				fmt.Printf("Host input %s key_down key=%v code=%v\n", sessionID, payload["key"], payload["code"])
-			case "key_up":
-				fmt.Printf("Host input %s key_up key=%v code=%v\n", sessionID, payload["key"], payload["code"])
-			default:
-				_ = dc.SendText(`{"type":"unsupported"}`)
-			}
-		})
-	})
-	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		fmt.Printf("Host peer state for %s: %s\n", sessionID, state.String())
-		if state == webrtc.PeerConnectionStateClosed ||
-			state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateDisconnected {
-			stop()
-		}
-	})
-
-	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
+		if err := sendHeartbeat(); err != nil {
+			heartbeatDone <- fmt.Errorf("heartbeat send failed: %w", err)
 			return
 		}
-		_ = postJSON(candidatesURL, map[string]string{
-			"candidate": candidate.ToJSON().Candidate,
-			"source":    "host",
-		})
-	})
 
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  session.OfferSDP,
-	}); err != nil {
-		return err
-	}
-
-	for _, candidate := range session.ViewerICECandidates {
-		if strings.TrimSpace(candidate) == "" {
-			continue
+		for {
+			select {
+			case <-ctx.Done():
+				heartbeatDone <- nil
+				return
+			case <-ticker.C:
+				if err := sendHeartbeat(); err != nil {
+					heartbeatDone <- fmt.Errorf("heartbeat send failed: %w", err)
+					return
+				}
+			}
 		}
-		_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: candidate})
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		return err
-	}
-	if err := pc.SetLocalDescription(answer); err != nil {
-		return err
-	}
-
-	select {
-	case <-webrtc.GatheringCompletePromise(pc):
-	case <-time.After(1500 * time.Millisecond):
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	local := pc.LocalDescription()
-	if local == nil || strings.TrimSpace(local.SDP) == "" {
-		return fmt.Errorf("local answer missing")
-	}
-	if err := postJSON(answerURL, map[string]string{"sdp": local.SDP}); err != nil {
-		return err
-	}
-
-	fmt.Printf("Host answer published for %s\n", sessionID)
-	appliedViewerCandidates := make(map[string]struct{}, len(session.ViewerICECandidates))
-	for _, candidate := range session.ViewerICECandidates {
-		appliedViewerCandidates[candidate] = struct{}{}
-	}
-
-	pollTicker := time.NewTicker(300 * time.Millisecond)
-	defer pollTicker.Stop()
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-done:
-			return nil
-		case <-pollTicker.C:
-			snapshot, err := fetchSessionSnapshot(sessionURL)
-			if err != nil {
-				continue
-			}
-			for _, candidate := range snapshot.ViewerICECandidates {
-				if strings.TrimSpace(candidate) == "" {
-					continue
+		case err := <-heartbeatDone:
+			return err
+		default:
+		}
+
+		var msg registerResponse
+		if err := conn.ReadJSON(&msg); err != nil {
+			return fmt.Errorf("ws read failed: %w", err)
+		}
+
+		switch msg.Type {
+		case "heartbeat_ack":
+			fmt.Printf("[%s] heartbeat ok for %s\n", time.Now().Format("15:04:05"), registered.PublicID)
+			localHostUI.noteHeartbeat()
+			for _, session := range msg.Sessions {
+				if err := handleDispatch(session); err != nil {
+					return err
 				}
-				if _, ok := appliedViewerCandidates[candidate]; ok {
-					continue
-				}
-				appliedViewerCandidates[candidate] = struct{}{}
-				_ = pc.AddICECandidate(webrtc.ICECandidateInit{Candidate: candidate})
 			}
+		case "session_acknowledged":
+			fmt.Printf("Acked    : %s (%s)\n", msg.SessionID, msg.Action)
+		case "control":
+			handleHostControlMessage(msg.SessionID, msg.Payload, func(sessionID string, payload map[string]any) {
+				if sessionID == "" || len(payload) == 0 {
+					return
+				}
+				if err := writeJSON(map[string]any{
+					"type":       "session_event",
+					"session_id": sessionID,
+					"payload":    payload,
+				}); err != nil {
+					fmt.Printf("Host session event %s send failed: %v\n", sessionID, err)
+				}
+			})
+		case "error":
+			return fmt.Errorf("%s", msg.Error)
 		}
 	}
 }
 
-func waitForSessionOffer(ctx context.Context, sessionURL, sessionID string, timeout time.Duration) (sessionSnapshot, error) {
-	deadline := time.Now().Add(timeout)
-	waitLogged := false
+func handleHostControlMessage(sessionID string, raw json.RawMessage, emit func(string, map[string]any)) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		fmt.Printf("Host control %s invalid json\n", sessionID)
+		return
+	}
 
-	for {
-		session, err := fetchSessionSnapshot(sessionURL)
+	switch strings.TrimSpace(fmt.Sprint(payload["type"])) {
+	case "ping":
+		fmt.Printf("Host control %s ping\n", sessionID)
+		emit(sessionID, map[string]any{
+			"type":        "pong",
+			"received_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	case "mouse_move":
+		x := numberValue(payload["x"])
+		y := numberValue(payload["y"])
+		if err := injectMouseMove(x, y); err != nil {
+			fmt.Printf("Host input %s mouse_move failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "mouse_move",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s mouse_move x=%0.4f y=%0.4f\n", sessionID, x, y)
+	case "mouse_down":
+		button := int(numberValue(payload["button"]))
+		x := numberValue(payload["x"])
+		y := numberValue(payload["y"])
+		if err := injectMouseButton(button, x, y, true); err != nil {
+			fmt.Printf("Host input %s mouse_down failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "mouse_down",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s mouse_down button=%d x=%0.4f y=%0.4f\n", sessionID, button, x, y)
+	case "mouse_up":
+		button := int(numberValue(payload["button"]))
+		x := numberValue(payload["x"])
+		y := numberValue(payload["y"])
+		if err := injectMouseButton(button, x, y, false); err != nil {
+			fmt.Printf("Host input %s mouse_up failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "mouse_up",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s mouse_up button=%d x=%0.4f y=%0.4f\n", sessionID, button, x, y)
+	case "mouse_wheel":
+		deltaY := int(numberValue(payload["delta_y"]))
+		x := numberValue(payload["x"])
+		y := numberValue(payload["y"])
+		if err := injectMouseWheel(x, y, deltaY); err != nil {
+			fmt.Printf("Host input %s mouse_wheel failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "mouse_wheel",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s mouse_wheel delta_y=%d x=%0.4f y=%0.4f\n", sessionID, deltaY, x, y)
+	case "mouse_click":
+		button := int(numberValue(payload["button"]))
+		x := numberValue(payload["x"])
+		y := numberValue(payload["y"])
+		if err := injectMouseClick(button, x, y); err != nil {
+			fmt.Printf("Host input %s mouse_click failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "mouse_click",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s mouse_click button=%d x=%0.4f y=%0.4f\n", sessionID, button, x, y)
+	case "key_down":
+		key := stringValue(payload["key"])
+		code := stringValue(payload["code"])
+		if err := injectKeyEvent(key, code, true); err != nil {
+			fmt.Printf("Host input %s key_down failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "key_down",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s key_down key=%s code=%s\n", sessionID, key, code)
+	case "key_up":
+		key := stringValue(payload["key"])
+		code := stringValue(payload["code"])
+		if err := injectKeyEvent(key, code, false); err != nil {
+			fmt.Printf("Host input %s key_up failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":    "input_error",
+				"control": "key_up",
+				"error":   err.Error(),
+			})
+			return
+		}
+		fmt.Printf("Host input %s key_up key=%s code=%s\n", sessionID, key, code)
+	case "clipboard_get":
+		text, err := readClipboardText()
 		if err != nil {
-			return sessionSnapshot{}, err
+			fmt.Printf("Host clipboard %s read failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":   "clipboard",
+				"action": "get",
+				"status": "error",
+				"error":  err.Error(),
+			})
+			return
 		}
-		if strings.TrimSpace(session.OfferSDP) != "" {
-			return session, nil
+		emit(sessionID, map[string]any{
+			"type":   "clipboard",
+			"action": "get",
+			"status": "ok",
+			"text":   text,
+		})
+	case "clipboard_set":
+		text := stringValue(payload["text"])
+		if err := writeClipboardText(text); err != nil {
+			fmt.Printf("Host clipboard %s write failed: %v\n", sessionID, err)
+			emit(sessionID, map[string]any{
+				"type":   "clipboard",
+				"action": "set",
+				"status": "error",
+				"error":  err.Error(),
+			})
+			return
 		}
-		if strings.EqualFold(strings.TrimSpace(session.Status), "closed") {
-			return sessionSnapshot{}, fmt.Errorf("session %s was closed before offer publication", sessionID)
-		}
-		if !waitLogged {
-			fmt.Printf("Waiting for viewer offer on session %s...\n", sessionID)
-			waitLogged = true
-		}
-		if time.Now().After(deadline) {
-			return sessionSnapshot{}, fmt.Errorf("offer not available for session %s within %s", sessionID, timeout)
-		}
-		select {
-		case <-ctx.Done():
-			return sessionSnapshot{}, ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		emit(sessionID, map[string]any{
+			"type":        "clipboard",
+			"action":      "set",
+			"status":      "ok",
+			"length":      len(text),
+			"received_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	case "file_begin":
+		beginIncomingFileTransfer(sessionID, payload, emit)
+	case "file_chunk":
+		writeIncomingFileTransferChunk(sessionID, payload, emit)
+	case "file_complete":
+		completeIncomingFileTransfer(sessionID, payload, emit)
+	case "file_cancel":
+		cancelIncomingFileTransfer(sessionID, payload, "cancelled by viewer", emit)
+	default:
+		fmt.Printf("Host control %s unsupported type=%v\n", sessionID, payload["type"])
+		emit(sessionID, map[string]any{
+			"type":    "unsupported",
+			"control": fmt.Sprint(payload["type"]),
+		})
+	}
+}
+
+func numberValue(value any) float64 {
+	switch cast := value.(type) {
+	case float64:
+		return cast
+	case float32:
+		return float64(cast)
+	case int:
+		return float64(cast)
+	case int64:
+		return float64(cast)
+	default:
+		return 0
+	}
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func int64Value(value any) int64 {
+	switch cast := value.(type) {
+	case int64:
+		return cast
+	case int:
+		return int64(cast)
+	case float64:
+		return int64(cast)
+	case float32:
+		return int64(cast)
+	default:
+		return 0
+	}
+}
+
+func beginIncomingFileTransfer(sessionID string, payload map[string]any, emit func(string, map[string]any)) {
+	transferID := stringValue(payload["transfer_id"])
+	if transferID == "" {
+		emit(sessionID, map[string]any{
+			"type":   "file_transfer",
+			"stage":  "error",
+			"status": "error",
+			"error":  "missing transfer id",
+		})
+		return
+	}
+
+	name := sanitizeTransferName(stringValue(payload["name"]))
+	if name == "" {
+		name = "unydesk-upload.bin"
+	}
+	declaredSize := int64Value(payload["size"])
+	destinationDir := hostTransferDirectory()
+	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"name":        name,
+			"stage":       "error",
+			"status":      "error",
+			"error":       err.Error(),
+		})
+		return
+	}
+
+	tempFile, err := os.CreateTemp(destinationDir, "unydesk-upload-*.part")
+	if err != nil {
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"name":        name,
+			"stage":       "error",
+			"status":      "error",
+			"error":       err.Error(),
+		})
+		return
+	}
+
+	fileTransferMu.Lock()
+	if existing := incomingTransfers[transferID]; existing != nil {
+		fileTransferMu.Unlock()
+		_ = tempFile.Close()
+		_ = os.Remove(tempFile.Name())
+		cancelIncomingFileTransfer(sessionID, map[string]any{"transfer_id": transferID}, "replaced by a new transfer", emit)
+		fileTransferMu.Lock()
+	}
+	incomingTransfers[transferID] = &incomingFileTransfer{
+		ID:             transferID,
+		Name:           name,
+		DeclaredSize:   declaredSize,
+		TempPath:       tempFile.Name(),
+		DestinationDir: destinationDir,
+		File:           tempFile,
+	}
+	fileTransferMu.Unlock()
+
+	emit(sessionID, map[string]any{
+		"type":        "file_transfer",
+		"transfer_id": transferID,
+		"name":        name,
+		"stage":       "started",
+		"status":      "ok",
+		"total_bytes": declaredSize,
+		"destination": destinationDir,
+	})
+}
+
+func writeIncomingFileTransferChunk(sessionID string, payload map[string]any, emit func(string, map[string]any)) {
+	transferID := stringValue(payload["transfer_id"])
+	index := int(int64Value(payload["index"]))
+	encoded := stringValue(payload["data"])
+	if transferID == "" || encoded == "" {
+		emit(sessionID, map[string]any{
+			"type":   "file_transfer",
+			"stage":  "error",
+			"status": "error",
+			"error":  "missing file chunk data",
+		})
+		return
+	}
+
+	fileTransferMu.Lock()
+	transfer := incomingTransfers[transferID]
+	fileTransferMu.Unlock()
+	if transfer == nil {
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"stage":       "error",
+			"status":      "error",
+			"error":       "unknown transfer id",
+		})
+		return
+	}
+	if index != transfer.NextChunkIndex {
+		cancelIncomingFileTransfer(sessionID, payload, fmt.Sprintf("unexpected chunk index %d", index), emit)
+		return
+	}
+
+	chunk, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		cancelIncomingFileTransfer(sessionID, payload, fmt.Sprintf("invalid file chunk: %v", err), emit)
+		return
+	}
+	if transfer.DeclaredSize > 0 && transfer.ReceivedBytes+int64(len(chunk)) > transfer.DeclaredSize {
+		cancelIncomingFileTransfer(sessionID, payload, "transfer size exceeded declared limit", emit)
+		return
+	}
+	if _, err := transfer.File.Write(chunk); err != nil {
+		cancelIncomingFileTransfer(sessionID, payload, fmt.Sprintf("write failed: %v", err), emit)
+		return
+	}
+
+	transfer.ReceivedBytes += int64(len(chunk))
+	transfer.NextChunkIndex++
+	now := time.Now()
+	if transfer.LastProgressAt.IsZero() || now.Sub(transfer.LastProgressAt) >= 350*time.Millisecond || transfer.ReceivedBytes == transfer.DeclaredSize || transfer.ReceivedBytes-transfer.LastProgressBytes >= 256*1024 {
+		transfer.LastProgressAt = now
+		transfer.LastProgressBytes = transfer.ReceivedBytes
+		emit(sessionID, map[string]any{
+			"type":           "file_transfer",
+			"transfer_id":    transferID,
+			"name":           transfer.Name,
+			"stage":          "progress",
+			"status":         "ok",
+			"bytes_received": transfer.ReceivedBytes,
+			"total_bytes":    transfer.DeclaredSize,
+		})
+	}
+}
+
+func completeIncomingFileTransfer(sessionID string, payload map[string]any, emit func(string, map[string]any)) {
+	transferID := stringValue(payload["transfer_id"])
+	if transferID == "" {
+		return
+	}
+
+	fileTransferMu.Lock()
+	transfer := incomingTransfers[transferID]
+	if transfer != nil {
+		delete(incomingTransfers, transferID)
+	}
+	fileTransferMu.Unlock()
+	if transfer == nil {
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"stage":       "error",
+			"status":      "error",
+			"error":       "unknown transfer id",
+		})
+		return
+	}
+
+	if transfer.File != nil {
+		if err := transfer.File.Close(); err != nil {
+			_ = os.Remove(transfer.TempPath)
+			emit(sessionID, map[string]any{
+				"type":        "file_transfer",
+				"transfer_id": transferID,
+				"name":        transfer.Name,
+				"stage":       "error",
+				"status":      "error",
+				"error":       err.Error(),
+			})
+			return
 		}
 	}
+	if transfer.DeclaredSize > 0 && transfer.ReceivedBytes != transfer.DeclaredSize {
+		_ = os.Remove(transfer.TempPath)
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"name":        transfer.Name,
+			"stage":       "error",
+			"status":      "error",
+			"error":       fmt.Sprintf("incomplete transfer: received %d of %d bytes", transfer.ReceivedBytes, transfer.DeclaredSize),
+		})
+		return
+	}
+
+	destinationPath := uniqueTransferPath(filepath.Join(transfer.DestinationDir, transfer.Name))
+	if err := os.Rename(transfer.TempPath, destinationPath); err != nil {
+		_ = os.Remove(transfer.TempPath)
+		emit(sessionID, map[string]any{
+			"type":        "file_transfer",
+			"transfer_id": transferID,
+			"name":        transfer.Name,
+			"stage":       "error",
+			"status":      "error",
+			"error":       err.Error(),
+		})
+		return
+	}
+
+	emit(sessionID, map[string]any{
+		"type":           "file_transfer",
+		"transfer_id":    transferID,
+		"name":           transfer.Name,
+		"stage":          "completed",
+		"status":         "ok",
+		"bytes_received": transfer.ReceivedBytes,
+		"total_bytes":    transfer.DeclaredSize,
+		"path":           destinationPath,
+	})
+}
+
+func cancelIncomingFileTransfer(sessionID string, payload map[string]any, reason string, emit func(string, map[string]any)) {
+	transferID := stringValue(payload["transfer_id"])
+	if transferID == "" {
+		return
+	}
+
+	fileTransferMu.Lock()
+	transfer := incomingTransfers[transferID]
+	if transfer != nil {
+		delete(incomingTransfers, transferID)
+	}
+	fileTransferMu.Unlock()
+
+	name := ""
+	if transfer != nil {
+		name = transfer.Name
+		if transfer.File != nil {
+			_ = transfer.File.Close()
+		}
+		if transfer.TempPath != "" {
+			_ = os.Remove(transfer.TempPath)
+		}
+	}
+
+	emit(sessionID, map[string]any{
+		"type":        "file_transfer",
+		"transfer_id": transferID,
+		"name":        name,
+		"stage":       "error",
+		"status":      "error",
+		"error":       reason,
+	})
+}
+
+func sanitizeTransferName(name string) string {
+	base := strings.TrimSpace(filepath.Base(name))
+	base = strings.ReplaceAll(base, "\\", "_")
+	base = strings.ReplaceAll(base, "/", "_")
+	base = strings.Trim(base, ". ")
+	if base == "" || base == "." || base == ".." {
+		return ""
+	}
+	return base
+}
+
+func hostTransferDirectory() string {
+	if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+		downloads := filepath.Join(homeDir, "Downloads")
+		if err := os.MkdirAll(downloads, 0o755); err == nil {
+			return downloads
+		}
+		desktop := filepath.Join(homeDir, "Desktop")
+		if err := os.MkdirAll(desktop, 0o755); err == nil {
+			return desktop
+		}
+	}
+	fallback := filepath.Join(os.TempDir(), "UnyDesk Transfers")
+	_ = os.MkdirAll(fallback, 0o755)
+	return fallback
+}
+
+func uniqueTransferPath(path string) string {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path
+	}
+	dir := filepath.Dir(path)
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(filepath.Base(path), ext)
+	for index := 2; index <= 9999; index++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, index, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, time.Now().Unix(), ext))
 }
 
 func fetchSessionSnapshot(endpoint string) (sessionSnapshot, error) {
@@ -546,6 +1231,49 @@ func postJSON(endpoint string, payload any) error {
 	return nil
 }
 
+func linkedAccountURL(serverURL, installID, publicID string) string {
+	if strings.TrimSpace(serverURL) == "" {
+		return ""
+	}
+	if !strings.Contains(serverURL, "://") {
+		serverURL = "http://" + serverURL
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return ""
+	}
+	u.Path = "/account/"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+func toScreenWebSocketURL(serverURL, sessionID, hostID string) (string, error) {
+	if !strings.Contains(serverURL, "://") {
+		serverURL = "http://" + serverURL
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "", err
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("unsupported server scheme %q", u.Scheme)
+	}
+	u.Path = "/api/v1/sessions/" + url.PathEscape(sessionID) + "/screen/ws"
+	query := url.Values{}
+	query.Set("role", "host")
+	query.Set("host_id", hostID)
+	u.RawQuery = query.Encode()
+	u.Fragment = ""
+	return u.String(), nil
+}
+
 func toWebSocketURL(serverURL string) (string, error) {
 	if !strings.Contains(serverURL, "://") {
 		serverURL = "http://" + serverURL
@@ -575,8 +1303,12 @@ func waitForEnter() {
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
-func loadOrCreateInstallID() (string, error) {
+func loadOrCreateInstallID(preferred string) (string, error) {
 	paths := installIDPaths()
+	if value := strings.TrimSpace(preferred); value != "" {
+		syncInstallID(paths, value)
+		return value, nil
+	}
 	for _, path := range paths {
 		if value, ok := readInstallID(path); ok {
 			syncInstallID(paths, value)

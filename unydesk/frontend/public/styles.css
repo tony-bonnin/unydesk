@@ -17,15 +17,16 @@
 * { box-sizing: border-box; }
 
 body {
-  margin: 0;
-  min-height: 100vh;
-  font-family: "Segoe UI", "Helvetica Neue", sans-serif;
-  color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(115, 109, 254, 0.16), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(62, 58, 171, 0.10), transparent 32%),
-    linear-gradient(180deg, #f7f8fd 0%, #eef1fb 100%);
-  padding: 28px;
+    display: flex;
+    margin: auto;
+    min-height: 100vh;
+    font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+    color: var(--text);
+    background: radial-gradient(circle at top left, rgba(115, 109, 254, 0.16), transparent 28%), radial-gradient(circle at bottom right, rgba(62, 58, 171, 0.10), transparent 32%), linear-gradient(180deg, #f7f8fd 0%, #eef1fb 100%);
+    padding: 2rem;
+    align-items: stretch;
+    flex-direction: column;
+    justify-content: center;
 }
 
 .shell {
@@ -45,7 +46,7 @@ body {
     justify-content: space-between;
     align-items: center;
     gap: 16px;
-    padding: 2rem 2rem 3rem;
+    padding: 0 2rem 2rem;
     border-bottom: 1px solid var(--border);
     background: rgba(255, 255, 255, 0.72);
 }
@@ -116,6 +117,7 @@ body {
 .account-btn i:first-child {
     color: var(--brand-2);
     opacity: 0.15;
+    font-size: 1.33rem;
 }
 
 .hero {
@@ -199,13 +201,18 @@ p {
 }
 
 .stat-value code {
+    display: block;
     font-family: monospace;
     font-weight: bold;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .stat-value.brand {
     color: var(--brand);
-    font-family: "Archivo Black", "Arial Black", sans-serif;
+    font-family: monospace;
     letter-spacing: -0.1rem;
 }
 
@@ -221,6 +228,10 @@ p {
     padding: 2rem 1.33rem;
     border-radius: 8px;
     background: linear-gradient(0deg, #f4f4ff, #eceeff);
+}
+
+.identity i {
+  opacity: 0.33;
 }
 
 .identity-label {
@@ -245,6 +256,12 @@ p {
     flex: 0 0 auto;
 }
 
+.standalone-password-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
 .identity-code {
     font-family: "Archivo Black", "Arial Black", sans-serif;
     font-size: clamp(1.3rem, 3vw, 2rem);
@@ -253,10 +270,22 @@ p {
 }
 
 .direct-address-code {
+    display: block;
     letter-spacing: 0.04em;
     font-size: clamp(1rem, 2.2vw, 1.35rem);
     font-family: monospace;
     font-weight: bold;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.direct-address-inline {
+    letter-spacing: 0.02em;
+}
+
+.standalone-password-code {
+    letter-spacing: 0.06em;
+    font-size: clamp(1rem, 2vw, 1.25rem);
 }
 
 .copy-btn,
@@ -282,6 +311,10 @@ p {
 
 .copy-btn i {
     font-size: 1rem;
+}
+
+.standalone-regen-btn i.is-spinning {
+    animation: standalone-spin 600ms linear;
 }
 
 .copy-feedback {
@@ -337,15 +370,22 @@ p {
     border: none;
     transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
 }
-
+.download-link {
+    padding: 0.33rem 1.33rem;
+    font-size: 0.8rem;
+}
 .btn:hover, .download-link:hover { transform: translateY(-1px); }
 
 .btn-primary, .download-link {
     background: linear-gradient(135deg, var(--brand), #0800b1);
     color: #fff;
     box-shadow: rgba(62, 58, 171, 0.22) 0 12px 24px;
+    max-width: 50%;
+    margin: 1rem 0;
 }
-
+.actions .btn,  .download-link {
+    margin: 0 !important;
+}
 .btn-secondary, .download-link.secondary {
     border: 1px solid var(--border);
     color: var(--text);
@@ -383,9 +423,11 @@ i.bi.bi-key-fill {
 }
 
 .auth-label span {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    line-height: 0;
+    padding: 0.33rem 0;
 }
 
 .auth-input {
@@ -550,6 +592,13 @@ i.bi.bi-key-fill {
   letter-spacing: 0.04em;
 }
 
+.host-table-actions,
+.overview-host-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .table-status {
     display: inline-flex;
     align-items: center;
@@ -583,12 +632,21 @@ i.bi.bi-key-fill {
   background: #fdecec;
 }
 
+.table-status.is-paused {
+  color: #c46a00;
+  background: #fff4e6;
+}
+
 .table-status.is-online::before {
   animation: statusPulseOnline 1.4s ease-in-out infinite;
 }
 
 .table-status.is-offline::before {
   animation: statusPulseOffline 1.8s ease-in-out infinite;
+}
+
+.table-status.is-paused::before {
+  animation: statusPulsePaused 1.6s ease-in-out infinite;
 }
 
 @keyframes statusPulseOnline {
@@ -606,6 +664,15 @@ i.bi.bi-key-fill {
   }
   50% {
     box-shadow: 0 0 0 4px rgba(213, 0, 0, 0.14);
+  }
+}
+
+@keyframes statusPulsePaused {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(196, 106, 0, 0.08);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(196, 106, 0, 0.16);
   }
 }
 
@@ -946,6 +1013,11 @@ i.bi.bi-key-fill {
   color: #dc2626;
 }
 
+#logout-btn i {
+    color: #dc2626;
+    opacity: 0.66;
+}
+
 .account-workspace {
   flex: 1;
   min-width: 0;
@@ -1130,7 +1202,7 @@ i.bi.bi-key-fill {
 
 .download-reco {
     padding: 16px;
-    border-radius: 4px;
+    border-radius: 8px;
     background: linear-gradient(180deg, #f4f4ff, #eceeff);
 }
 
@@ -1154,15 +1226,23 @@ i.bi.bi-key-fill {
 }
 
 .download-note {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 0.88rem;
-  line-height: 1.55;
+    margin-top: 12px;
+    color: var(--muted);
+    font-size: 0.75rem;
+    line-height: 1.55;
 }
 
 .connection-mode-card {
     margin-top: 16px;
     padding: 1rem 2rem;
+    border-radius: 8px;
+    background: linear-gradient(180deg, #ffffff, #f7f8ff);
+    box-shadow: rgba(62, 58, 171, 0.06) 0 12px 30px;
+}
+
+.standalone-card {
+    margin-top: 16px;
+    padding: 1rem;
     border-radius: 8px;
     background: linear-gradient(180deg, #ffffff, #f7f8ff);
     box-shadow: rgba(62, 58, 171, 0.06) 0 12px 30px;
@@ -1179,8 +1259,22 @@ i.bi.bi-key-fill {
 }
 
 .connection-mode-head span {
-  color: var(--muted);
-  font-size: 0.84rem;
+    color: var(--muted);
+    font-size: 0.84rem;
+    margin-bottom: 0.66rem;
+}
+
+.standalone-form {
+  display: grid;
+  gap: 12px;
+}
+
+.standalone-actions .btn {
+  width: 100%;
+}
+
+.standalone-status-line {
+  min-height: 22px;
 }
 
 .connection-mode-grid {
@@ -1596,6 +1690,202 @@ i.bi.bi-key-fill {
   padding: 14px;
 }
 
+.session-screen-card {
+  margin-top: 16px;
+  border: 1px solid rgba(8, 0, 177, 0.08);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff, #f8f9ff);
+  padding: 14px;
+}
+
+.session-control-utilities {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.session-utility-card {
+  border: 1px solid rgba(8, 0, 177, 0.08);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff, #f8f9ff);
+  padding: 14px;
+}
+
+.session-utility-head {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.session-utility-head span,
+.session-status-line,
+.session-file-meta {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.session-inline-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0.15rem 0;
+}
+
+.session-file-meta {
+  min-height: 1.2rem;
+}
+
+.session-status-line {
+  margin-top: 12px;
+  min-height: 1.2rem;
+}
+
+.session-screen-card-head {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.session-screen-card-head span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.session-screen-stage {
+  min-height: 280px;
+  border: 1px solid rgba(8, 0, 177, 0.12);
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(62, 58, 171, 0.12), transparent 30%),
+    linear-gradient(180deg, #eef1ff, #e4eaff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M3 2l10 10H8.6l2.5 5.1-1.8.9-2.5-5.1L4 15.6V2z' fill='%23000000'/%3E%3Cpath d='M3.6 3.3v10.85l2.83-2.81h.39l2.34 4.8.78-.39-2.34-4.8v-.54h3.54L3.6 3.3z' fill='%23ffffff' fill-opacity='.18'/%3E%3C/svg%3E") 3 2, auto;
+}
+
+.session-screen-stage:focus {
+  border-color: rgba(8, 0, 177, 0.38);
+  box-shadow: 0 0 0 4px rgba(62, 58, 171, 0.12);
+}
+
+.session-screen-stage.is-pressing {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M3 2l10 10H8.6l2.5 5.1-1.8.9-2.5-5.1L4 15.6V2z' fill='%23000000'/%3E%3Cpath d='M3.6 3.3v10.85l2.83-2.81h.39l2.34 4.8.78-.39-2.34-4.8v-.54h3.54L3.6 3.3z' fill='%23ffffff' fill-opacity='.18'/%3E%3C/svg%3E") 3 2, auto;
+}
+
+.session-screen-stage.is-fullscreen {
+  background: #0b1026;
+}
+
+body.account-control-expanded .account-workspace-main {
+  padding: 0;
+  overflow: hidden;
+}
+
+body.account-control-expanded .account-dashboard-shell,
+body.account-control-expanded .account-workspace,
+body.account-control-expanded .account-workspace-main,
+body.account-control-expanded .account-panel,
+body.account-control-expanded .account-control-workspace {
+  background: #000;
+}
+
+body.account-control-expanded .account-workspace-topbar,
+body.account-control-expanded .account-panel-copy,
+body.account-control-expanded .message-container,
+body.account-control-expanded .session-control-grid > .settings-card:last-child,
+body.account-control-expanded .session-control-grid > .settings-card:first-child > .dashboard-head,
+body.account-control-expanded .session-control-grid > .settings-card:first-child > .dashboard-grid,
+body.account-control-expanded .session-control-grid > .settings-card:first-child > .session-modal-actions,
+body.account-control-expanded .session-control-grid > .settings-card:first-child > .session-control-utilities {
+  display: none;
+}
+
+body.account-control-expanded .session-control-grid {
+  display: block;
+  height: 100vh;
+  margin: 0;
+}
+
+body.account-control-expanded .session-control-grid > .settings-card:first-child {
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+body.account-control-expanded .session-screen-card {
+  margin-top: 0;
+  width: 100vw;
+  height: 100vh;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+body.account-control-expanded .session-screen-card-head {
+  display: none;
+}
+
+body.account-control-expanded .session-screen-stage {
+  width: 100vw;
+  height: 100vh;
+  min-height: 100vh;
+  max-height: 100vh;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+}
+
+.session-screen-video,
+.session-screen-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+  background: #dfe4ff;
+}
+
+.session-screen-video {
+  max-height: 72vh;
+}
+
+.session-screen-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  background: #dfe4ff;
+}
+
+body.account-control-expanded .session-screen-canvas,
+body.account-control-expanded .session-screen-video,
+body.account-control-expanded .session-screen-image {
+  width: auto;
+  height: auto;
+  max-width: 100vw;
+  max-height: 100vh;
+  background: transparent;
+}
+
+.session-screen-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--brand-2);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
 .session-control-pad-head {
   display: grid;
   gap: 4px;
@@ -1640,6 +1930,10 @@ i.bi.bi-key-fill {
   min-height: 120px;
 }
 
+.session-clipboard-text {
+  min-height: 122px;
+}
+
 .input-short {
   max-width: 110px;
 }
@@ -1647,6 +1941,13 @@ i.bi.bi-key-fill {
 .downloads {
   display: grid;
   gap: 12px;
+}
+
+@media (max-width: 1040px) {
+  .session-control-grid,
+  .session-control-utilities {
+    grid-template-columns: 1fr;
+  }
 }
 
 .download-card {
@@ -1658,6 +1959,14 @@ i.bi.bi-key-fill {
   border-radius: 8px;
   border: 1px solid var(--border);
   background: #fff;
+}
+
+.download-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .download-card strong,
@@ -1709,6 +2018,12 @@ aside code {
     padding: 0.15rem 0.66rem;
     border-radius: 2px;
 }
+
+@keyframes standalone-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @media (max-width: 860px) {
   body { padding: 14px; }
   .topbar {

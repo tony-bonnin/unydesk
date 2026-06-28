@@ -1,19 +1,26 @@
 package server
 
 import (
-	"crypto/rand"
+	"compress/flate"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,9 +33,11 @@ import (
 var embeddedAssets embed.FS
 
 const (
-	csrfCookieName = "unydesk_csrf"
-	csrfHeaderName = "X-CSRF-Token"
-	authCookieName = "unydesk_session"
+	csrfCookieName         = "unydesk_csrf"
+	csrfHeaderName         = "X-CSRF-Token"
+	authCookieName         = "unydesk_session"
+	browserTokenCookieName = "unydesk_browser_token"
+	standaloneTokenHeader  = "X-UnyDesk-Standalone-Token"
 )
 
 type Server struct {
@@ -38,6 +47,102 @@ type Server struct {
 	store      *remote.MemoryStore
 	authStore  *auth.Store
 	publicID   string
+	hostMu     sync.RWMutex
+	hostConns  map[string]*hostConn
+	eventMu    sync.RWMutex
+	eventSubs  map[string]map[*hostConn]struct{}
+	screenMu   sync.RWMutex
+	screenSubs map[string]*screenRelay
+	downloadMu sync.Mutex
+}
+
+type hostConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+type screenRelay struct {
+	host    *hostConn
+	viewers map[*hostConn]struct{}
+}
+
+func (c *hostConn) writeJSON(v any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn.EnableWriteCompression(true)
+	return c.conn.WriteJSON(v)
+}
+
+func (c *hostConn) writeMessage(messageType int, payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(messageType, payload)
+}
+
+func (c *hostConn) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_ = c.conn.Close()
+}
+
+func resolveRequestHostIPv4(r *http.Request) string {
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if idx := strings.Index(host, ","); idx >= 0 {
+		host = strings.TrimSpace(host[:idx])
+	}
+	if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return ""
+	}
+	for _, ip := range ips {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+	}
+	return ""
+}
+
+func resolveRequestClientIPv4(r *http.Request) string {
+	for _, headerName := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		raw := strings.TrimSpace(r.Header.Get(headerName))
+		if raw == "" {
+			continue
+		}
+		for _, part := range strings.Split(raw, ",") {
+			if ip := parseIPv4(strings.TrimSpace(part)); ip != "" {
+				return ip
+			}
+		}
+	}
+	return parseIPv4(r.RemoteAddr)
+}
+
+func parseIPv4(value string) string {
+	if value == "" {
+		return ""
+	}
+	if splitHost, _, err := net.SplitHostPort(value); err == nil {
+		value = splitHost
+	}
+	value = strings.Trim(value, "[]")
+	if ip := net.ParseIP(value); ip != nil {
+		if ipv4 := ip.To4(); ipv4 != nil {
+			return ipv4.String()
+		}
+	}
+	return ""
 }
 
 func New(cfg config.Settings, store *remote.MemoryStore, authStore *auth.Store, logger *slog.Logger) *Server {
@@ -48,11 +153,14 @@ func New(cfg config.Settings, store *remote.MemoryStore, authStore *auth.Store, 
 	}
 
 	s := &Server{
-		logger:   logger,
-		cfg:      cfg,
-		store:    store,
-		authStore: authStore,
-		publicID: publicID,
+		logger:     logger,
+		cfg:        cfg,
+		store:      store,
+		authStore:  authStore,
+		publicID:   publicID,
+		hostConns:  make(map[string]*hostConn),
+		eventSubs:  make(map[string]map[*hostConn]struct{}),
+		screenSubs: make(map[string]*screenRelay),
 	}
 
 	mux := http.NewServeMux()
@@ -60,6 +168,7 @@ func New(cfg config.Settings, store *remote.MemoryStore, authStore *auth.Store, 
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/api/v1/info", s.handleInfo)
 	mux.HandleFunc("/api/v1/browser/identity", s.handleBrowserIdentity)
+	mux.HandleFunc("/api/v1/standalone/session", s.handleStandaloneSession)
 	mux.HandleFunc("/api/v1/auth/register", s.handleAuthRegister)
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/v1/auth/logout", s.handleAuthLogout)
@@ -101,11 +210,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":                     s.cfg.Name,
 		"version":                  config.Version,
 		"listen_addr":              s.cfg.ListenAddr,
+		"host_ipv4":                resolveRequestHostIPv4(r),
+		"client_ipv4":              resolveRequestClientIPv4(r),
 		"allow_origin":             s.cfg.Security.AllowOrigin,
 		"session_ttl":              s.cfg.Remote.SessionTTLMinutes,
 		"public_id":                s.publicID,
@@ -115,11 +226,17 @@ func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"frontend_reload_strategy": "serve-from-disk-and-refresh",
 		"downloads": map[string]string{
 			"linux_amd64_host":   "/download/host/linux-amd64",
+			"linux_amd64_zip":    "/download/host/linux-amd64.zip",
 			"linux_arm64_host":   "/download/host/linux-arm64",
+			"linux_arm64_zip":    "/download/host/linux-arm64.zip",
 			"windows_amd64_host": "/download/host/windows-amd64",
+			"windows_amd64_zip":  "/download/host/windows-amd64.zip",
 			"windows_arm64_host": "/download/host/windows-arm64",
+			"windows_arm64_zip":  "/download/host/windows-arm64.zip",
 			"macos_amd64_host":   "/download/host/macos-amd64",
+			"macos_amd64_zip":    "/download/host/macos-amd64.zip",
 			"macos_arm64_host":   "/download/host/macos-arm64",
+			"macos_arm64_zip":    "/download/host/macos-arm64.zip",
 			"checksums":          "/download/host/checksums",
 		},
 		"host_api": map[string]string{
@@ -145,14 +262,14 @@ func (s *Server) handleBrowserIdentity(w http.ResponseWriter, r *http.Request) {
 
 	token := strings.TrimSpace(r.URL.Query().Get("token"))
 	if token == "" {
-		token = strings.TrimSpace(readCookieValue(r, "unydesk_browser_token"))
+		token = strings.TrimSpace(readCookieValue(r, browserTokenCookieName))
 	}
-	if token == "" {
+	if !isValidInstallID(token) {
 		token = newCSRFToken()
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "unydesk_browser_token",
+		Name:     browserTokenCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: false,
@@ -161,12 +278,29 @@ func (s *Server) handleBrowserIdentity(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   60 * 60 * 24 * 365 * 10,
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":        remote.StableID("browser", token),
-		"public_id": remote.StablePublicID("browser", token),
-		"token":     token,
-		"kind":      "browser",
-	})
+	identityID := remote.StableID("host", token)
+	identityPublicID := remote.StablePublicID("host", token)
+	payload := map[string]any{
+		"id":         identityID,
+		"public_id":  identityPublicID,
+		"token":      token,
+		"role":       "client",
+		"kind":       "install",
+		"linked":     false,
+		"install_id": token,
+	}
+
+	if host, ok := s.store.FindHostByInstallID(token); ok {
+		payload["linked"] = true
+		payload["hostname"] = host.Hostname
+		payload["host_registered"] = true
+		payload["host_role"] = host.Role
+		payload["host_access_enabled"] = host.AccessEnabled
+		payload["host_online"] = strings.EqualFold(strings.TrimSpace(host.Status), "online")
+		payload["host_id"] = host.ID
+	}
+
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleAuthRegister(w http.ResponseWriter, r *http.Request) {
@@ -304,44 +438,177 @@ func (s *Server) handleHostDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
 
 	target := strings.TrimPrefix(r.URL.Path, "/download/host/")
-	filename := ""
-	switch target {
-	case "linux-amd64":
-		filename = "unydesk-host-linux-amd64"
-	case "linux-arm64":
-		filename = "unydesk-host-linux-arm64"
-	case "windows-amd64":
-		filename = "unydesk-host-windows-amd64.exe"
-	case "windows-arm64":
-		filename = "unydesk-host-windows-arm64.exe"
-	case "macos-amd64":
-		filename = "unydesk-host-darwin-amd64"
-	case "macos-arm64":
-		filename = "unydesk-host-darwin-arm64"
-	case "checksums":
-		filename = "SHA256SUMS"
-	default:
+	spec, ok := hostTargetSpec(target)
+	if !ok {
 		writeError(w, http.StatusNotFound, "host download not found")
 		return
 	}
 
-	path := filepath.Join(s.cfg.Paths.HostDownloadsDir, filename)
+	path := filepath.Join(s.cfg.Paths.HostDownloadsDir, spec.filename)
 	if _, err := os.Stat(path); err != nil {
 		writeError(w, http.StatusNotFound, "host binary not available yet")
 		return
 	}
 
-	if filename == "SHA256SUMS" {
+	if spec.filename == "SHA256SUMS" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		http.ServeFile(w, r, path)
 		return
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	w.Header().Set("Content-Type", "application/octet-stream")
+	installID := strings.TrimSpace(r.URL.Query().Get("install_id"))
+	if installID == "" {
+		installID = strings.TrimSpace(readCookieValue(r, browserTokenCookieName))
+	}
+	if !isValidInstallID(installID) {
+		installID = ""
+	}
+	if installID != "" && spec.goos != "" && spec.goarch != "" && !strings.HasSuffix(spec.filename, ".zip") {
+		pairedPath, err := s.compilePairedHostBinary(spec, installID, baseServerURL(r))
+		if err != nil {
+			s.logger.Warn("paired host build failed", "target", target, "install_id", installID, "err", err)
+			writeError(w, http.StatusInternalServerError, "unable to prepare paired host binary")
+			return
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", spec.filename))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, pairedPath)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", spec.filename))
+	if strings.HasSuffix(spec.filename, ".zip") {
+		w.Header().Set("Content-Type", "application/zip")
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
 	http.ServeFile(w, r, path)
+}
+
+type hostDownloadSpec struct {
+	goos     string
+	goarch   string
+	filename string
+}
+
+func hostTargetSpec(target string) (hostDownloadSpec, bool) {
+	switch target {
+	case "linux-amd64":
+		return hostDownloadSpec{goos: "linux", goarch: "amd64", filename: "unydesk-host-linux-amd64"}, true
+	case "linux-amd64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-linux-amd64.zip"}, true
+	case "linux-arm64":
+		return hostDownloadSpec{goos: "linux", goarch: "arm64", filename: "unydesk-host-linux-arm64"}, true
+	case "linux-arm64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-linux-arm64.zip"}, true
+	case "windows-amd64":
+		return hostDownloadSpec{goos: "windows", goarch: "amd64", filename: "unydesk-host-windows-amd64.exe"}, true
+	case "windows-amd64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-windows-amd64.zip"}, true
+	case "windows-arm64":
+		return hostDownloadSpec{goos: "windows", goarch: "arm64", filename: "unydesk-host-windows-arm64.exe"}, true
+	case "windows-arm64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-windows-arm64.zip"}, true
+	case "macos-amd64":
+		return hostDownloadSpec{goos: "darwin", goarch: "amd64", filename: "unydesk-host-darwin-amd64"}, true
+	case "macos-amd64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-macos-amd64.zip"}, true
+	case "macos-arm64":
+		return hostDownloadSpec{goos: "darwin", goarch: "arm64", filename: "unydesk-host-darwin-arm64"}, true
+	case "macos-arm64.zip":
+		return hostDownloadSpec{filename: "unydesk-host-macos-arm64.zip"}, true
+	case "checksums":
+		return hostDownloadSpec{filename: "SHA256SUMS"}, true
+	}
+	return hostDownloadSpec{}, false
+}
+
+func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serverURL string) (string, error) {
+	s.downloadMu.Lock()
+	defer s.downloadMu.Unlock()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	sourceFingerprint := hostBinarySourceFingerprint(wd)
+	cacheKey := remote.StableID("paired-host", sourceFingerprint+":"+spec.goos+":"+spec.goarch+":"+strings.TrimSpace(installID)+":"+strings.TrimSpace(serverURL))
+	outDir := filepath.Join(s.cfg.Paths.HostDownloadsDir, "paired")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", err
+	}
+	outPath := filepath.Join(outDir, cacheKey+"-"+spec.filename)
+	if _, err := os.Stat(outPath); err == nil {
+		return outPath, nil
+	}
+
+	ldflagsParts := []string{
+		"-s",
+		"-w",
+		fmt.Sprintf("-X main.defaultServerURL=%s", strings.TrimSpace(serverURL)),
+		fmt.Sprintf("-X main.defaultInstallID=%s", strings.TrimSpace(installID)),
+	}
+	if spec.goos == "windows" {
+		ldflagsParts = append([]string{"-H=windowsgui"}, ldflagsParts...)
+	}
+	ldflags := strings.Join(ldflagsParts, " ")
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags", ldflags, "-o", outPath, "./cmd/unydesk-host")
+	cmd.Dir = wd
+	cmd.Env = append(os.Environ(),
+		"CGO_ENABLED=0",
+		"GOOS="+spec.goos,
+		"GOARCH="+spec.goarch,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(outPath)
+		return "", fmt.Errorf("go build failed: %s", strings.TrimSpace(string(output)))
+	}
+	return outPath, nil
+}
+
+func hostBinarySourceFingerprint(root string) string {
+	hasher := sha256.New()
+	inputs := []string{
+		filepath.Join(root, "go.mod"),
+		filepath.Join(root, "go.sum"),
+		filepath.Join(root, "cmd", "unydesk-host"),
+	}
+
+	for _, path := range inputs {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(hasher, "%s|%d|%d\n", path, info.Size(), info.ModTime().UnixNano())
+			continue
+		}
+		_ = filepath.WalkDir(path, func(current string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() {
+				return walkErr
+			}
+			fileInfo, err := entry.Info()
+			if err != nil {
+				return nil
+			}
+			fmt.Fprintf(hasher, "%s|%d|%d\n", current, fileInfo.Size(), fileInfo.ModTime().UnixNano())
+			return nil
+		})
+	}
+
+	return fmt.Sprintf("%x", hasher.Sum(nil))
+}
+
+func baseServerURL(r *http.Request) string {
+	scheme := "http"
+	if requestIsHTTPS(r) {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s", scheme, r.Host)
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -362,7 +629,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "target and viewer are required")
 			return
 		}
-		if host, ok := s.store.FindHostByTarget(req.Target); ok {
+		timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+		if host, ok := s.store.FindHostByTarget(req.Target, timeout); ok {
 			writeJSON(w, http.StatusCreated, s.store.CreateRouted(req, &host))
 			return
 		}
@@ -370,6 +638,52 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleStandaloneSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Target   string `json:"target"`
+		Viewer   string `json:"viewer"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	target := strings.TrimSpace(req.Target)
+	viewer := strings.TrimSpace(req.Viewer)
+	password := strings.TrimSpace(req.Password)
+	if target == "" || viewer == "" || password == "" {
+		writeError(w, http.StatusBadRequest, "target, viewer and password are required")
+		return
+	}
+
+	createReq := remote.CreateSessionRequest{
+		Target:         target,
+		Viewer:         viewer,
+		ViewerAuthMode: "standalone",
+	}
+
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	var session remote.Session
+	if host, ok := s.store.FindHostByTarget(createReq.Target, timeout); ok {
+		session = s.store.CreateRouted(createReq, &host)
+	} else {
+		session = s.store.Create(createReq)
+	}
+
+	session, err := s.store.SetStandaloneViewerToken(session.ID, password)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusCreated, session)
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +716,8 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(_ *http.Request) bool { return true },
+		CheckOrigin:       func(_ *http.Request) bool { return true },
+		EnableCompression: true,
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -410,6 +725,8 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.EnableWriteCompression(true)
+	_ = conn.SetCompressionLevel(flate.BestSpeed)
 
 	var hello remote.HostWireMessage
 	if err := conn.ReadJSON(&hello); err != nil {
@@ -427,8 +744,11 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	host := s.store.RegisterHost(*req)
+	liveConn := &hostConn{conn: conn}
+	s.setHostConn(host.ID, liveConn)
+	defer s.clearHostConn(host.ID, liveConn)
 	s.logger.Info("host registered over ws", "host_id", host.ID, "public_id", host.PublicID, "hostname", host.Hostname)
-	if err := conn.WriteJSON(remote.HostWireMessage{
+	if err := liveConn.writeJSON(remote.HostWireMessage{
 		Type:     "registered",
 		HostID:   host.ID,
 		PublicID: host.PublicID,
@@ -438,7 +758,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 
 	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		_, err := s.store.TouchHost(host.ID)
+		_, err := s.store.TouchHostState(host.ID, "", nil)
 		if err == nil {
 			_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 		}
@@ -453,9 +773,16 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 		}
 		switch msg.Type {
 		case "heartbeat":
-			host, err = s.store.TouchHost(host.ID)
+			var heartbeat remote.HostHeartbeatState
+			if len(msg.Payload) > 0 {
+				if err := json.Unmarshal(msg.Payload, &heartbeat); err != nil {
+					_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "invalid heartbeat payload"})
+					return
+				}
+			}
+			host, err = s.store.TouchHostState(host.ID, heartbeat.Role, heartbeat.AccessEnabled)
 			if err != nil {
-				_ = conn.WriteJSON(remote.HostWireMessage{Type: "error", Error: "unknown host"})
+				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "unknown host"})
 				return
 			}
 			queuedSessions := s.store.ListQueuedSessionsForHost(host.ID)
@@ -475,7 +802,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 				dispatchedIDs = append(dispatchedIDs, session.ID)
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
-			if err := conn.WriteJSON(remote.HostWireMessage{
+			if err := liveConn.writeJSON(remote.HostWireMessage{
 				Type:     "heartbeat_ack",
 				HostID:   host.ID,
 				PublicID: host.PublicID,
@@ -486,15 +813,15 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 			s.store.MarkSessionsDispatched(dispatchedIDs)
 		case "session_ack":
 			if strings.TrimSpace(msg.SessionID) == "" {
-				_ = conn.WriteJSON(remote.HostWireMessage{Type: "error", Error: "session_id is required"})
+				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "session_id is required"})
 				return
 			}
 			session, err := s.store.AcknowledgeSessionForHost(host.ID, msg.SessionID, msg.Action)
 			if err != nil {
-				_ = conn.WriteJSON(remote.HostWireMessage{Type: "error", Error: "unknown session"})
+				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "unknown session"})
 				return
 			}
-			if err := conn.WriteJSON(remote.HostWireMessage{
+			if err := liveConn.writeJSON(remote.HostWireMessage{
 				Type:      "session_acknowledged",
 				SessionID: session.ID,
 				Action:    session.DispatchState,
@@ -503,8 +830,17 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				return
 			}
+		case "session_event":
+			if strings.TrimSpace(msg.SessionID) == "" || len(msg.Payload) == 0 {
+				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "session_id and payload are required"})
+				return
+			}
+			if err := s.broadcastSessionEvent(msg.SessionID, msg.Payload); err != nil {
+				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: err.Error()})
+				return
+			}
 		default:
-			if err := conn.WriteJSON(remote.HostWireMessage{Type: "error", Error: "unsupported message type"}); err != nil {
+			if err := liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "unsupported message type"}); err != nil {
 				return
 			}
 		}
@@ -541,6 +877,14 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAnswer(w, r, id)
 	case "candidates":
 		s.handleCandidate(w, r, id)
+	case "ws":
+		s.handleSessionWS(w, r, id)
+	case "screen":
+		if len(parts) > 2 && parts[2] == "ws" {
+			s.handleScreenWS(w, r, id)
+			return
+		}
+		s.handleScreenFrame(w, r, id)
 	case "close":
 		s.handleClose(w, r, id)
 	default:
@@ -602,9 +946,266 @@ func (s *Server) handleCandidate(w http.ResponseWriter, r *http.Request, id stri
 	writeJSON(w, http.StatusOK, session)
 }
 
+func (s *Server) handleScreenFrame(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		if _, ok := s.currentUserFromRequest(r); !ok {
+			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		data, contentType, ok := s.store.GetScreenFrame(id)
+		if !ok || len(data) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.TrimSpace(contentType) == "" {
+			contentType = "image/jpeg"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		_, _ = w.Write(data)
+	case http.MethodPost:
+		contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+		if strings.HasPrefix(contentType, "image/") {
+			data, err := io.ReadAll(r.Body)
+			if err != nil || len(data) == 0 {
+				writeError(w, http.StatusBadRequest, "screen frame body is required")
+				return
+			}
+			width := intHeaderValue(r, "X-UnyDesk-Screen-Width")
+			height := intHeaderValue(r, "X-UnyDesk-Screen-Height")
+			session, err := s.store.SetScreenFrameBinary(id, data, contentType, "", width, height, "")
+			if err != nil {
+				writeError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			writeJSON(w, http.StatusOK, session)
+			return
+		}
+
+		var req remote.ScreenFrameRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		if strings.TrimSpace(req.DataURL) == "" && strings.TrimSpace(req.Error) == "" {
+			writeError(w, http.StatusBadRequest, "screen frame payload is required")
+			return
+		}
+		session, err := s.store.SetScreenFrame(id, req.DataURL, req.Width, req.Height, req.Error)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, session)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleScreenWS(w http.ResponseWriter, r *http.Request, id string) {
+	role := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
+	switch role {
+	case "host":
+		s.handleHostScreenWS(w, r, id)
+	case "viewer":
+		s.handleViewerScreenWS(w, r, id)
+	default:
+		writeError(w, http.StatusBadRequest, "screen websocket role is required")
+	}
+}
+
+func (s *Server) handleHostScreenWS(w http.ResponseWriter, r *http.Request, id string) {
+	session, err := s.store.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	hostID := strings.TrimSpace(r.URL.Query().Get("host_id"))
+	if hostID == "" || hostID != strings.TrimSpace(session.RoutedHostID) {
+		writeError(w, http.StatusForbidden, "host is not allowed to stream this session")
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin:       func(_ *http.Request) bool { return true },
+		EnableCompression: false,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Warn("host screen ws upgrade failed", "session_id", id, "err", err)
+		return
+	}
+	defer conn.Close()
+
+	screenConn := &hostConn{conn: conn}
+	s.setScreenHost(id, screenConn)
+	defer s.clearScreenHost(id, screenConn)
+
+	for {
+		messageType, payload, readErr := conn.ReadMessage()
+		if readErr != nil {
+			return
+		}
+		switch messageType {
+		case websocket.BinaryMessage, websocket.TextMessage:
+			s.broadcastScreenFrame(id, messageType, payload)
+		case websocket.PingMessage:
+			if err := screenConn.writeMessage(websocket.PongMessage, payload); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) handleViewerScreenWS(w http.ResponseWriter, r *http.Request, id string) {
+	if !s.authorizeSessionViewer(r, id) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if _, err := s.store.Get(id); err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin:       func(_ *http.Request) bool { return true },
+		EnableCompression: false,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Warn("viewer screen ws upgrade failed", "session_id", id, "err", err)
+		return
+	}
+	defer conn.Close()
+
+	screenConn := &hostConn{conn: conn}
+	s.addScreenViewer(id, screenConn)
+	defer s.removeScreenViewer(id, screenConn)
+	_ = screenConn.writeJSON(map[string]any{"type": "screen_stream", "state": "connected"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, readErr := conn.ReadMessage(); readErr != nil {
+				return
+			}
+		}
+	}()
+
+	pingTicker := time.NewTicker(20 * time.Second)
+	defer pingTicker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-pingTicker.C:
+			if err := screenConn.writeMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) setScreenHost(sessionID string, conn *hostConn) {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
+	relay := s.ensureScreenRelayLocked(sessionID)
+	if relay.host != nil && relay.host != conn {
+		relay.host.close()
+	}
+	relay.host = conn
+}
+
+func (s *Server) clearScreenHost(sessionID string, conn *hostConn) {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
+	relay, ok := s.screenSubs[sessionID]
+	if !ok {
+		return
+	}
+	if relay.host == conn {
+		relay.host = nil
+	}
+	if relay.host == nil && len(relay.viewers) == 0 {
+		delete(s.screenSubs, sessionID)
+	}
+}
+
+func (s *Server) addScreenViewer(sessionID string, conn *hostConn) {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
+	relay := s.ensureScreenRelayLocked(sessionID)
+	relay.viewers[conn] = struct{}{}
+}
+
+func (s *Server) removeScreenViewer(sessionID string, conn *hostConn) {
+	s.screenMu.Lock()
+	defer s.screenMu.Unlock()
+	relay, ok := s.screenSubs[sessionID]
+	if !ok {
+		return
+	}
+	delete(relay.viewers, conn)
+	if relay.host == nil && len(relay.viewers) == 0 {
+		delete(s.screenSubs, sessionID)
+	}
+}
+
+func (s *Server) broadcastScreenFrame(sessionID string, messageType int, payload []byte) {
+	s.screenMu.RLock()
+	relay := s.screenSubs[sessionID]
+	if relay == nil || len(relay.viewers) == 0 {
+		s.screenMu.RUnlock()
+		return
+	}
+	targets := make([]*hostConn, 0, len(relay.viewers))
+	for viewer := range relay.viewers {
+		targets = append(targets, viewer)
+	}
+	s.screenMu.RUnlock()
+
+	for _, viewer := range targets {
+		if err := viewer.writeMessage(messageType, payload); err != nil {
+			viewer.close()
+			s.removeScreenViewer(sessionID, viewer)
+		}
+	}
+}
+
+func (s *Server) ensureScreenRelayLocked(sessionID string) *screenRelay {
+	relay, ok := s.screenSubs[sessionID]
+	if !ok {
+		relay = &screenRelay{viewers: make(map[*hostConn]struct{})}
+		s.screenSubs[sessionID] = relay
+	}
+	if relay.viewers == nil {
+		relay.viewers = make(map[*hostConn]struct{})
+	}
+	return relay
+}
+
+func intHeaderValue(r *http.Request, name string) int {
+	raw := strings.TrimSpace(r.Header.Get(name))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizeSessionViewer(r, id) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 	session, err := s.store.Close(id)
@@ -613,6 +1214,192 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	writeJSON(w, http.StatusOK, session)
+}
+
+func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request, id string) {
+	if !s.authorizeSessionViewer(r, id) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin:       func(_ *http.Request) bool { return true },
+		EnableCompression: true,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Warn("session ws upgrade failed", "session_id", id, "err", err)
+		return
+	}
+	defer conn.Close()
+	conn.EnableWriteCompression(true)
+	_ = conn.SetCompressionLevel(flate.BestSpeed)
+	viewerConn := &hostConn{conn: conn}
+
+	session, err := s.store.Get(id)
+	if err != nil {
+		_ = viewerConn.writeJSON(map[string]any{
+			"type":  "error",
+			"error": "session not found",
+		})
+		return
+	}
+
+	updates, cancel := s.store.SubscribeSession(id)
+	defer cancel()
+	s.addSessionEventViewer(id, viewerConn)
+	defer s.removeSessionEventViewer(id, viewerConn)
+
+	if err := viewerConn.writeJSON(map[string]any{
+		"type":    "session",
+		"session": session,
+	}); err != nil {
+		return
+	}
+
+	type viewerControlMessage struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+
+	done := make(chan struct{})
+	controls := make(chan json.RawMessage, 8)
+	go func() {
+		defer close(done)
+		for {
+			var msg viewerControlMessage
+			if readErr := conn.ReadJSON(&msg); readErr != nil {
+				return
+			}
+			if msg.Type != "control" || len(msg.Payload) == 0 {
+				continue
+			}
+			select {
+			case controls <- msg.Payload:
+			default:
+			}
+		}
+	}()
+
+	pingTicker := time.NewTicker(20 * time.Second)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-pingTicker.C:
+			if err := viewerConn.writeMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case payload := <-controls:
+			if err := s.forwardControlToHost(id, payload); err != nil {
+				_ = viewerConn.writeJSON(map[string]any{
+					"type":  "error",
+					"error": err.Error(),
+				})
+			}
+		case session := <-updates:
+			if err := viewerConn.writeJSON(map[string]any{
+				"type":    "session",
+				"session": session,
+			}); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) setHostConn(hostID string, conn *hostConn) {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	s.hostConns[hostID] = conn
+}
+
+func (s *Server) clearHostConn(hostID string, conn *hostConn) {
+	s.hostMu.Lock()
+	defer s.hostMu.Unlock()
+	current, ok := s.hostConns[hostID]
+	if !ok || current != conn {
+		return
+	}
+	delete(s.hostConns, hostID)
+}
+
+func (s *Server) addSessionEventViewer(sessionID string, conn *hostConn) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	targets := s.eventSubs[sessionID]
+	if targets == nil {
+		targets = make(map[*hostConn]struct{})
+		s.eventSubs[sessionID] = targets
+	}
+	targets[conn] = struct{}{}
+}
+
+func (s *Server) removeSessionEventViewer(sessionID string, conn *hostConn) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	targets := s.eventSubs[sessionID]
+	if targets == nil {
+		return
+	}
+	delete(targets, conn)
+	if len(targets) == 0 {
+		delete(s.eventSubs, sessionID)
+	}
+}
+
+func (s *Server) broadcastSessionEvent(sessionID string, payload json.RawMessage) error {
+	if _, err := s.store.Get(sessionID); err != nil {
+		return fmt.Errorf("unknown session")
+	}
+
+	s.eventMu.RLock()
+	targetSet := s.eventSubs[sessionID]
+	if len(targetSet) == 0 {
+		s.eventMu.RUnlock()
+		return nil
+	}
+	targets := make([]*hostConn, 0, len(targetSet))
+	for viewer := range targetSet {
+		targets = append(targets, viewer)
+	}
+	s.eventMu.RUnlock()
+
+	for _, viewer := range targets {
+		if err := viewer.writeJSON(map[string]any{
+			"type":  "event",
+			"event": json.RawMessage(payload),
+		}); err != nil {
+			viewer.close()
+			s.removeSessionEventViewer(sessionID, viewer)
+		}
+	}
+	return nil
+}
+
+func (s *Server) forwardControlToHost(sessionID string, payload json.RawMessage) error {
+	session, err := s.store.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(session.RoutedHostID) == "" {
+		return fmt.Errorf("session has no routed host")
+	}
+
+	s.hostMu.RLock()
+	hostConn := s.hostConns[session.RoutedHostID]
+	s.hostMu.RUnlock()
+	if hostConn == nil {
+		return fmt.Errorf("host is not connected")
+	}
+
+	return hostConn.writeJSON(remote.HostWireMessage{
+		Type:      "control",
+		SessionID: sessionID,
+		Payload:   payload,
+	})
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
@@ -625,7 +1412,7 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", s.cfg.Security.AllowOrigin)
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token, X-UnyDesk-Standalone-Token")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Expose-Headers", csrfHeaderName)
 		if r.Method == http.MethodOptions {
@@ -643,7 +1430,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 			"base-uri 'self'",
 			"object-src 'none'",
 			"frame-ancestors 'none'",
-			"img-src 'self' data:",
+			"img-src 'self' data: blob:",
 			"font-src 'self' data:",
 			"style-src 'self'",
 			"script-src 'self'",
@@ -743,9 +1530,18 @@ func (s *Server) registerDiskFrontend(mux *http.ServeMux, frontendDir string) {
 	mux.Handle("/account/", s.requireAuthPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		target := filepath.Join(frontendDir, filepath.Clean(path))
-		if info, err := os.Stat(target); err == nil && !info.IsDir() {
-			http.ServeFile(w, r, target)
-			return
+		if info, err := os.Stat(target); err == nil {
+			if info.IsDir() {
+				indexPath := filepath.Join(target, "index.html")
+				if indexInfo, indexErr := os.Stat(indexPath); indexErr == nil && !indexInfo.IsDir() {
+					http.ServeFile(w, r, indexPath)
+					return
+				}
+			}
+			if !info.IsDir() {
+				http.ServeFile(w, r, target)
+				return
+			}
 		}
 		http.ServeFile(w, r, filepath.Join(frontendDir, "account", "index.html"))
 	})))
@@ -858,6 +1654,17 @@ func (s *Server) currentUserFromRequest(r *http.Request) (auth.PublicUser, bool)
 	return user, true
 }
 
+func (s *Server) authorizeSessionViewer(r *http.Request, sessionID string) bool {
+	if _, ok := s.currentUserFromRequest(r); ok {
+		return true
+	}
+	token := readStandaloneViewerToken(r)
+	if token == "" {
+		return false
+	}
+	return s.store.ValidateStandaloneViewerToken(sessionID, token)
+}
+
 func readCSRFCookie(r *http.Request) string {
 	cookie, err := r.Cookie(csrfCookieName)
 	if err != nil {
@@ -872,6 +1679,31 @@ func readCookieValue(r *http.Request, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(cookie.Value)
+}
+
+func readStandaloneViewerToken(r *http.Request) string {
+	if header := strings.TrimSpace(r.Header.Get(standaloneTokenHeader)); header != "" {
+		return header
+	}
+	return strings.TrimSpace(r.URL.Query().Get("standalone_token"))
+}
+
+func isValidInstallID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 16 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func newCSRFToken() string {

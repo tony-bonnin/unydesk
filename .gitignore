@@ -1,3 +1,15 @@
 unyremote/backend/tmp/
 unyremote/backend/server/assets/
 unyremote/backend/logs/
+
+# Local UnyDesk build outputs.
+unydesk/backend/unydesk
+unydesk/backend/unydesk-host
+unydesk/backend/unydesk-host.exe
+
+# Per-install paired host binaries are generated on demand and can become huge.
+unydesk/backend/tmp/host-downloads/paired/
+
+# Interrupted zip/build commands may leave anonymous temporary files here.
+unydesk/backend/tmp/host-downloads/tmp*
+unydesk/backend/tmp/host-downloads/*.tmp
