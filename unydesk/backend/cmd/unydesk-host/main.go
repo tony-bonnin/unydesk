@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +27,8 @@ import (
 
 var defaultServerURL = ""
 var defaultInstallID = ""
+
+const hostBuildID = "20260629-h264-first-stall-guard"
 
 type hostInfo struct {
 	Name    string `json:"name"`
@@ -130,7 +132,7 @@ func main() {
 
 	info := hostInfo{
 		Name:    "UnyDesk Host",
-		Version: "0.1.0-alpha",
+		Version: "0.1.0-alpha+" + hostBuildID,
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,
 		Status:  "bootstrap",
@@ -175,6 +177,7 @@ func main() {
 		return
 	}
 
+	prewarmRealtimeEncodersAsync()
 	if !windowsTrayMode {
 		printBanner(info)
 	}
@@ -197,6 +200,28 @@ func main() {
 	if runtime.GOOS == "windows" && *consoleMode && !*noPause {
 		waitForEnter()
 	}
+}
+
+func prewarmRealtimeEncodersAsync() {
+	go func() {
+		started := time.Now()
+		ffmpegPath, ok := lookupFFmpegBinary()
+		if !ok {
+			fmt.Println("FFmpeg warmup: skipped (encoder not found)")
+			return
+		}
+		h265, h265OK := lookupH265Encoder(ffmpegPath)
+		av1, av1OK := lookupAV1Encoder(ffmpegPath)
+		h265Status := "unavailable"
+		if h265OK {
+			h265Status = h265
+		}
+		av1Status := "unavailable"
+		if av1OK {
+			av1Status = av1
+		}
+		fmt.Printf("FFmpeg warmup: ready in %s, h265=%s, av1=%s, path=%s\n", time.Since(started).Round(time.Millisecond), h265Status, av1Status, ffmpegPath)
+	}()
 }
 
 func printJSON(info hostInfo) {
@@ -238,11 +263,11 @@ func resolveServerURL(flagValue string, sidecar bootstrapConfig) (string, string
 	if value := strings.TrimSpace(os.Getenv("UNYDESK_SERVER")); value != "" {
 		return value, "environment"
 	}
-	if value := strings.TrimSpace(sidecar.Server); value != "" {
-		return value, "sidecar config"
-	}
 	if value := strings.TrimSpace(defaultServerURL); value != "" {
 		return value, "embedded default"
+	}
+	if value := strings.TrimSpace(sidecar.Server); value != "" {
+		return value, "sidecar config"
 	}
 	return "", ""
 }
@@ -279,12 +304,47 @@ func readBootstrapConfigFile(path string) (bootstrapConfig, bool) {
 		var payload bootstrapConfig
 		if err := json.Unmarshal(data, &payload); err == nil {
 			payload.Server = strings.TrimSpace(payload.Server)
+			if payload.Server != "" && !looksLikeServerAddress(payload.Server) {
+				payload.Server = ""
+			}
 			payload.InstallID = strings.TrimSpace(payload.InstallID)
 			payload.PublicID = strings.TrimSpace(payload.PublicID)
 			return payload, payload.Server != "" || payload.InstallID != "" || payload.PublicID != ""
 		}
 	}
+	if !looksLikeServerAddress(raw) {
+		return bootstrapConfig{}, false
+	}
 	return bootstrapConfig{Server: raw}, true
+}
+
+func looksLikeServerAddress(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, " \t\r\n") {
+		return false
+	}
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		if err != nil || strings.TrimSpace(parsed.Host) == "" {
+			return false
+		}
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https", "ws", "wss":
+			return true
+		default:
+			return false
+		}
+	}
+
+	host := value
+	if splitHost, _, err := net.SplitHostPort(value); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
+		return true
+	}
+	return strings.Contains(host, ".")
 }
 
 func resolveInstallIDOverride(flagValue string, sidecar bootstrapConfig) string {
@@ -480,14 +540,11 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 
 func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, info hostInfo, identity *hostIdentity) error {
 	dialer := *websocket.DefaultDialer
-	dialer.EnableCompression = true
-	conn, _, err := dialer.Dial(wsURL, nil)
+	conn, resp, err := dialer.Dial(wsURL, serverAuthHeaders(serverURL))
 	if err != nil {
-		return err
+		return presentableWebSocketDialError(err, resp)
 	}
 	defer conn.Close()
-	conn.EnableWriteCompression(true)
-	_ = conn.SetCompressionLevel(flate.BestSpeed)
 
 	var writeMu sync.Mutex
 	writeJSON := func(v any) error {
@@ -535,6 +592,11 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	identity.PublicID = registered.PublicID
 	accountURL := linkedAccountURL(serverURL, identity.InstallID, registered.PublicID)
 	localHostUI.setConnected(*identity, accountURL)
+	runtimeCfg, runtimeErr := fetchRuntimeConfig(serverURL)
+	if runtimeErr != nil {
+		fmt.Printf("Warning: realtime runtime config unavailable: %v\n", runtimeErr)
+		runtimeCfg = runtimeConfig{Features: normalizeRuntimeFeatures(runtimeFeatureWire{}, nil, nil)}
+	}
 
 	fmt.Println()
 	if firstConnect {
@@ -549,6 +611,8 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	fmt.Printf("Public ID : %s\n", registered.PublicID)
 	fmt.Printf("Install ID : %s\n", identity.InstallID)
 	fmt.Println("Transport : WebSocket")
+	fmt.Printf("WebRTC ICE : %d server(s)\n", len(runtimeCfg.ICEServers))
+	fmt.Printf("Realtime : H265=%t H264=%t AV1=%t QUIC=%t codecs=%s\n", runtimeCfg.Features.H265, runtimeCfg.Features.H264, runtimeCfg.Features.AV1, runtimeCfg.Features.QUIC, strings.Join(runtimeCfg.Features.PreferredVideoCodecs, ","))
 	if linkURL := accountURL; linkURL != "" {
 		fmt.Printf("Browser link : %s\n", linkURL)
 	}
@@ -569,6 +633,7 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 		activeMu.Lock()
 		if _, exists := activeSessions[sessionID]; exists {
 			activeMu.Unlock()
+			fmt.Printf("Realtime : session %s already active; keeping existing WebRTC worker\n", sessionID)
 			return
 		}
 		stop := make(chan struct{})
@@ -576,13 +641,27 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 		activeMu.Unlock()
 
 		sessionURL := strings.TrimRight(serverURL, "/") + "/api/v1/sessions/" + url.PathEscape(sessionID)
+		emitServerEvent := func(sessionID string, payload map[string]any) {
+			if sessionID == "" || len(payload) == 0 {
+				return
+			}
+			if err := writeJSON(map[string]any{
+				"type":       "session_event",
+				"session_id": sessionID,
+				"payload":    payload,
+			}); err != nil {
+				fmt.Printf("Host session event %s send failed: %v\n", sessionID, err)
+			}
+		}
 		go func() {
 			defer func() {
 				activeMu.Lock()
-				delete(activeSessions, sessionID)
+				if current, ok := activeSessions[sessionID]; ok && current == stop {
+					delete(activeSessions, sessionID)
+				}
 				activeMu.Unlock()
 			}()
-			runWebRTCSession(ctx, stop, sessionURL, sessionID)
+			runWebRTCSession(ctx, stop, sessionURL, sessionID, runtimeCfg, emitServerEvent)
 		}()
 	}
 
@@ -853,6 +932,14 @@ func handleHostControlMessage(sessionID string, raw json.RawMessage, emit func(s
 		completeIncomingFileTransfer(sessionID, payload, emit)
 	case "file_cancel":
 		cancelIncomingFileTransfer(sessionID, payload, "cancelled by viewer", emit)
+	case "screen_fallback_request":
+		fmt.Printf("Host control %s ignored signaling fallback request; peer data channel owns screen fallback\n", sessionID)
+		emit(sessionID, map[string]any{
+			"type":      "screen_status",
+			"transport": "video",
+			"action":    "fallback-ignored",
+			"reason":    "screen fallback requests must use the peer data channel",
+		})
 	default:
 		fmt.Printf("Host control %s unsupported type=%v\n", sessionID, payload["type"])
 		emit(sessionID, map[string]any{
@@ -860,6 +947,42 @@ func handleHostControlMessage(sessionID string, raw json.RawMessage, emit func(s
 			"control": fmt.Sprint(payload["type"]),
 		})
 	}
+}
+
+func presentableWebSocketDialError(err error, resp *http.Response) error {
+	if err == nil {
+		return nil
+	}
+	if resp == nil {
+		return err
+	}
+	detail := strings.TrimSpace(resp.Status)
+	if authenticate := strings.TrimSpace(resp.Header.Get("WWW-Authenticate")); authenticate != "" {
+		detail += ", WWW-Authenticate: " + authenticate
+	}
+	return fmt.Errorf("%w (%s)", err, detail)
+}
+
+func serverAuthHeaders(serverURL string) http.Header {
+	header := http.Header{}
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_SERVER_AUTH")); value != "" {
+		header.Set("Authorization", normalizeAuthorizationHeader(value))
+		return header
+	}
+	parsed, err := url.Parse(serverURL)
+	if err != nil || parsed.User == nil {
+		return header
+	}
+	password, _ := parsed.User.Password()
+	header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(parsed.User.Username()+":"+password)))
+	return header
+}
+
+func normalizeAuthorizationHeader(value string) string {
+	if strings.Contains(value, " ") {
+		return value
+	}
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(value))
 }
 
 func numberValue(value any) float64 {

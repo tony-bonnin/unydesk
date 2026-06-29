@@ -36,6 +36,9 @@ func (e screenImageEncoder) encode(img image.Image, frameKind byte) ([]byte, str
 		} else if err != nil {
 			return nil, "", 0, err
 		}
+		if encoded, err := e.encodeAdaptiveJPEG(img); err == nil {
+			return encoded, "image/jpeg", screenWireCodecJPEG, nil
+		}
 	}
 	if encoded, err := e.encodeAdaptiveWebP(img); err == nil {
 		return encoded, "image/webp", screenWireCodecWebP, nil
@@ -101,7 +104,7 @@ func encodeLosslessWebPWithinBudget(img image.Image, maxPixels, maxBytes int) ([
 	var encoded bytes.Buffer
 	options := webp.OptionsForPreset(webp.PresetText, 80)
 	options.Lossless = true
-	options.Method = 4
+	options.Method = 0
 	options.Exact = true
 	if err := webp.Encode(&encoded, img, options); err != nil {
 		return nil, false, err
@@ -140,8 +143,8 @@ func (e screenImageEncoder) encodeAdaptiveWebP(img image.Image) ([]byte, error) 
 	for index, quality := range qualities {
 		var encoded bytes.Buffer
 		options := webp.OptionsForPreset(webp.PresetText, quality)
-		options.Method = 4
-		options.Pass = 2
+		options.Method = 0
+		options.Pass = 1
 		options.FilterStrength = 0
 		options.FilterSharpness = 6
 		options.Preprocessing = 0

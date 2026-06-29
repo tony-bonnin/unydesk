@@ -11,11 +11,14 @@
     sessionModalOpen: false,
     currentSessionID: '',
     sessionPollTimer: null,
+    sessionPollInFlight: false,
     viewerPeerConnection: null,
     viewerDataChannel: null,
     viewerTransportState: 'Idle',
     viewerTransportLog: [],
     remoteCandidatesSeen: [],
+    iceServers: [],
+    runtimeInfoLoaded: false,
     creatingSession: false,
     settingsTab: 'profile',
     preferences: {
@@ -30,6 +33,7 @@
     hosts: 'Hosts',
     sessions: 'Sessions',
   };
+  const sessionsCollectionURL = '/api/v1/sessions/';
 
   const preferenceStorageKey = 'unydesk.account.preferences';
 
@@ -236,6 +240,60 @@
     return 'fa-solid fa-desktop';
   }
 
+  function hostPlatformLabel(host) {
+    const os = hostOSLabel(host && host.os);
+    const arch = hostArchLabel(host && host.arch);
+    if (os === '?' && arch === '?') return '?';
+    if (os === '?') return arch;
+    if (arch === '?') return os;
+    return `${os} ${arch}`;
+  }
+
+  function hostOSLabel(value) {
+    const raw = String(value || '').trim();
+    const osName = raw.toLowerCase();
+    if (!osName) return '?';
+    const linuxDistro = linuxDistributionLabel(osName);
+    if (linuxDistro) return linuxDistro;
+    if (osName.includes('windows')) return 'Windows';
+    if (osName.includes('darwin') || osName.includes('mac') || osName.includes('osx')) return 'macOS';
+    if (osName.includes('linux')) return 'Linux';
+    return raw;
+  }
+
+  function linuxDistributionLabel(source) {
+    const distributions = [
+      [/ubuntu/, 'Ubuntu Linux'],
+      [/debian/, 'Debian Linux'],
+      [/fedora/, 'Fedora Linux'],
+      [/\brhel\b/, 'Red Hat Enterprise Linux'],
+      [/red\s*hat/, 'Red Hat Enterprise Linux'],
+      [/centos/, 'CentOS Linux'],
+      [/rocky/, 'Rocky Linux'],
+      [/almalinux/, 'AlmaLinux'],
+      [/opensuse/, 'openSUSE Linux'],
+      [/\bsuse\b/, 'SUSE Linux'],
+      [/\barch\b/, 'Arch Linux'],
+      [/manjaro/, 'Manjaro Linux'],
+      [/alpine/, 'Alpine Linux'],
+      [/gentoo/, 'Gentoo Linux'],
+      [/linux\s*mint/, 'Linux Mint'],
+      [/\bmint\b/, 'Linux Mint'],
+      [/pop[!_\s-]*os/, 'Pop!_OS'],
+    ];
+    const match = distributions.find(([pattern]) => pattern.test(source));
+    return match ? match[1] : '';
+  }
+
+  function hostArchLabel(value) {
+    const arch = String(value || '').trim().toLowerCase();
+    if (!arch) return '?';
+    if (['amd64', 'x86_64', 'x64'].includes(arch)) return '64-bits';
+    if (['386', 'i386', 'i686', 'x86'].includes(arch)) return '32-bits';
+    if (['arm64', 'aarch64'].includes(arch)) return 'ARM64';
+    return value;
+  }
+
   function hostRoleLabel(host) {
     return String(host && host.role ? host.role : 'host').trim().toLowerCase() === 'client' ? 'Client' : 'Host';
   }
@@ -301,16 +359,23 @@
 
   function startSessionPolling() {
     stopSessionPolling();
-    state.sessionPollTimer = window.setInterval(() => {
-      if (!state.currentSessionID || !state.sessionModalOpen) return;
-      void refreshSessionDetails(false);
-    }, 250);
+    state.sessionPollTimer = window.setInterval(async () => {
+      if (!state.currentSessionID || !state.sessionModalOpen || document.hidden || state.sessionPollInFlight) return;
+      state.sessionPollInFlight = true;
+      try {
+        await refreshSessionDetails(false);
+      } catch (_error) {
+      } finally {
+        state.sessionPollInFlight = false;
+      }
+    }, 1500);
   }
 
   function stopSessionPolling() {
     if (!state.sessionPollTimer) return;
     window.clearInterval(state.sessionPollTimer);
     state.sessionPollTimer = null;
+    state.sessionPollInFlight = false;
   }
 
   function appendTransportLog(message) {
@@ -319,6 +384,70 @@
     state.viewerTransportLog = state.viewerTransportLog.slice(-40);
     sessionTransportLogEl.value = state.viewerTransportLog.join('\n');
     sessionTransportLogEl.scrollTop = sessionTransportLogEl.scrollHeight;
+  }
+
+  function normalizeIceServerURLs(urls) {
+    if (typeof urls === 'string') {
+      const value = urls.trim();
+      return value ? [value] : [];
+    }
+    if (!Array.isArray(urls)) return [];
+    const seen = new Set();
+    const normalized = [];
+    urls.forEach((url) => {
+      const value = String(url || '').trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      normalized.push(value);
+    });
+    return normalized;
+  }
+
+  function normalizeIceServers(servers) {
+    if (!Array.isArray(servers)) return [];
+    return servers.map((server) => {
+      const urls = normalizeIceServerURLs(server && server.urls);
+      if (urls.length === 0) return null;
+      const normalized = { urls };
+      const username = String((server && server.username) || '').trim();
+      const credential = String((server && server.credential) || '').trim();
+      const credentialType = String((server && (server.credentialType || server.credential_type)) || '').trim();
+      if (username) normalized.username = username;
+      if (credential) normalized.credential = credential;
+      if (credentialType) normalized.credentialType = credentialType;
+      return normalized;
+    }).filter(Boolean);
+  }
+
+  function describeIceServers(servers) {
+    if (!servers || servers.length === 0) {
+      return 'ICE servers not configured; direct host candidates only';
+    }
+    let stunURLs = 0;
+    let turnURLs = 0;
+    servers.forEach((server) => {
+      normalizeIceServerURLs(server.urls).forEach((url) => {
+        const value = url.toLowerCase();
+        if (value.startsWith('turn:') || value.startsWith('turns:')) turnURLs += 1;
+        if (value.startsWith('stun:') || value.startsWith('stuns:')) stunURLs += 1;
+      });
+    });
+    return `ICE servers configured: ${servers.length} server(s), ${turnURLs} TURN URL(s), ${stunURLs} STUN URL(s)`;
+  }
+
+  async function loadRuntimeInfo() {
+    try {
+      const response = await fetch('/api/v1/info');
+      captureCSRF(response);
+      if (!response.ok) throw new Error(`runtime info failed (${response.status})`);
+      const data = await response.json();
+      const servers = data.ice_servers || (data.webrtc && data.webrtc.ice_servers) || [];
+      state.iceServers = normalizeIceServers(servers);
+      state.runtimeInfoLoaded = true;
+    } catch (_error) {
+      state.iceServers = [];
+      state.runtimeInfoLoaded = false;
+    }
   }
 
   function resetViewerTransport() {
@@ -481,10 +610,13 @@
     clearSessionFeedback();
     sessionStartSignalingBtn.disabled = true;
     try {
-      const pc = new RTCPeerConnection({
-        iceServers: [],
-        iceCandidatePoolSize: 1,
-      });
+      if (!state.runtimeInfoLoaded) await loadRuntimeInfo();
+      appendTransportLog(describeIceServers(state.iceServers));
+      const peerConfig = {
+        iceServers: state.iceServers,
+        iceCandidatePoolSize: state.iceServers.length > 0 ? 2 : 1,
+      };
+      const pc = new RTCPeerConnection(peerConfig);
       state.viewerPeerConnection = pc;
       state.viewerTransportState = 'Starting';
       renderSessionDetails(await fetchSession(state.currentSessionID));
@@ -731,22 +863,23 @@
     captureCSRF(response);
     if (!response.ok) throw new Error('host fetch failed');
     const data = await response.json();
-    state.hosts = data.hosts || [];
+    state.hosts = sortHostsStable(data.hosts || []);
     renderHosts();
   }
 
   function renderHosts() {
-    const onlineCount = state.hosts.filter((host) => host.status === 'online').length;
-    const totalCount = state.hosts.length;
+    const hosts = sortHostsStable(state.hosts);
+    const onlineCount = hosts.filter((host) => host.status === 'online').length;
+    const totalCount = hosts.length;
     hostsOnlineEl.textContent = String(onlineCount);
     hostsTotalEl.textContent = String(totalCount);
     hostsOfflineEl.textContent = String(Math.max(0, totalCount - onlineCount));
-    renderOverviewHosts();
-    if (!state.hosts.length) {
+    renderOverviewHosts(hosts);
+    if (!hosts.length) {
       hostsTableBody.innerHTML = '<tr><td colspan="5">No hosts registered yet.</td></tr>';
       return;
     }
-    hostsTableBody.innerHTML = state.hosts.map((host) => `
+    hostsTableBody.innerHTML = hosts.map((host) => `
       <tr>
         <td class="host-table-cell">
           <div class="host-name-stack">
@@ -755,7 +888,7 @@
           </div>
         </td>
         <td>${escapeHTML(host.public_id || '—')}</td>
-        <td>${escapeHTML(`${host.os || '?'} / ${host.arch || '?'}`)}</td>
+        <td>${escapeHTML(hostPlatformLabel(host))}</td>
         <td><span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span></td>
         <td>
           <div class="host-table-actions">
@@ -775,8 +908,34 @@
     bindHostControlActions();
   }
 
-  function renderOverviewHosts() {
-    const onlineHosts = state.hosts.filter((host) => host.status === 'online');
+  function sortHostsStable(hosts) {
+    return [...hosts].sort(compareHostsStable);
+  }
+
+  function compareHostsStable(a, b) {
+    const leftRegistered = hostRegisteredAtTime(a);
+    const rightRegistered = hostRegisteredAtTime(b);
+    if (leftRegistered !== rightRegistered) return leftRegistered - rightRegistered;
+    return hostStableSortKey(a).localeCompare(hostStableSortKey(b));
+  }
+
+  function hostRegisteredAtTime(host) {
+    const value = new Date((host && host.registered_at) || '').getTime();
+    return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+  }
+
+  function hostStableSortKey(host) {
+    return [
+      host && host.hostname,
+      host && host.name,
+      host && host.public_id,
+      host && host.install_id,
+      host && host.id,
+    ].map((part) => String(part || '').trim().toLowerCase()).join('\u0000');
+  }
+
+  function renderOverviewHosts(hosts = state.hosts) {
+    const onlineHosts = sortHostsStable(hosts).filter((host) => host.status === 'online');
     if (!onlineHosts.length) {
       overviewHostsGridEl.innerHTML = '<div class="overview-host-empty">No connected hosts right now.</div>';
       return;
@@ -794,7 +953,7 @@
           <span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span>
         </div>
         <div class="overview-host-card-meta">
-          <span>${escapeHTML(`${hostRoleLabel(host)} role · ${host.os || '?'} / ${host.arch || '?'}`)}</span>
+          <span>${escapeHTML(`${hostRoleLabel(host)} role · ${hostPlatformLabel(host)}`)}</span>
         </div>
         <div class="overview-host-actions">
           <button
@@ -812,7 +971,7 @@
   }
 
   function bindHostControlActions() {
-    document.querySelectorAll('[data-target]').forEach((button) => {
+    document.querySelectorAll('.host-control-btn[data-target], .overview-host-action[data-target]').forEach((button) => {
       if (button.dataset.controlBound === '1') return;
       button.dataset.controlBound = '1';
       button.addEventListener('click', async () => {
@@ -828,7 +987,7 @@
   }
 
   async function loadSessions() {
-    const response = await fetch('/api/v1/sessions');
+    const response = await fetch(sessionsCollectionURL);
     captureCSRF(response);
     if (!response.ok) throw new Error('session list fetch failed');
     const data = await response.json();
@@ -894,7 +1053,7 @@
     state.creatingSession = true;
     sessionCreateBtn.disabled = true;
     try {
-      const response = await fetch('/api/v1/sessions', {
+      const response = await fetch(sessionsCollectionURL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -903,20 +1062,26 @@
         body: JSON.stringify({ target, viewer }),
       });
       captureCSRF(response);
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         setFeedback(null, 'error', data.error || 'Unable to create session.');
+        return;
+      }
+      const sessionID = String(data.id || '').trim();
+      if (!sessionID) {
+        console.error('Unexpected session creation response', data);
+        setFeedback(null, 'error', data.error || 'Session creation returned no session id.');
         return;
       }
       if (!preserveTarget) {
         sessionTargetEl.value = '';
       }
-      setFeedback(null, 'success', `Session ${data.id} is ready.`);
+      setFeedback(null, 'success', `Session ${sessionID} is ready.`);
       await loadSessions();
       if (switchToSessions) {
         setCurrentSection('sessions');
       }
-      openSessionTab(data.id);
+      openSessionTab(sessionID);
     } finally {
       state.creatingSession = false;
       sessionCreateBtn.disabled = false;
@@ -1013,6 +1178,20 @@
     window.location.assign('/');
   }
 
+  function scheduleDashboardRefresh(loader, delay) {
+    let inFlight = false;
+    return window.setInterval(async () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      try {
+        await loader();
+      } catch (_error) {
+      } finally {
+        inFlight = false;
+      }
+    }, delay);
+  }
+
   sessionCreateBtn.addEventListener('click', createSession);
   profileSaveBtn.addEventListener('click', saveProfile);
   preferencesSaveBtn.addEventListener('click', savePreferences);
@@ -1070,13 +1249,14 @@
 
   try {
     await ensureBrowserIdentity();
+    await loadRuntimeInfo();
     const authenticated = await loadSession();
     if (!authenticated) return;
     const initialSection = (window.location.hash || '').replace(/^#/, '');
     setCurrentSection(initialSection || state.preferences.defaultSection || 'overview');
     await Promise.all([loadHosts(), loadSessions()]);
-    window.setInterval(() => loadHosts().catch(() => {}), 2000);
-    window.setInterval(() => loadSessions().catch(() => {}), 2000);
+    scheduleDashboardRefresh(loadHosts, 5000);
+    scheduleDashboardRefresh(loadSessions, 7000);
   } catch (_error) {
     statusEl.textContent = 'Dashboard unavailable';
   }

@@ -206,7 +206,7 @@ func (provider ffmpegH264EncoderProvider) Capabilities() []providerCapability {
 
 func plannedEncoderCapabilities() []providerCapability {
 	capabilities := []providerCapability{
-		{Name: "ffmpeg-av1-hardware", Kind: "hardware-av1", Status: providerStatusPlanned, Reason: "reserved for NVENC/QSV/AMF/VideoToolbox AV1 provider"},
+		{Name: "ffmpeg-av1-opportunistic", Kind: "adaptive-av1", Status: providerStatusAvailable, Reason: "enabled when the viewer offers AV1 and FFmpeg exposes av1_nvenc/qsv/amf/libsvtav1/libaom"},
 		{Name: "ffmpeg-h264-hardware", Kind: "hardware-h264", Status: providerStatusPlanned, Reason: "reserved for NVENC/QSV/AMF/VideoToolbox H.264 provider"},
 	}
 	switch runtime.GOOS {
@@ -261,7 +261,7 @@ func (webRTCTransportProvider) Capabilities() []providerCapability {
 		{Name: "webrtc-direct", Kind: "p2p-udp", Status: providerStatusActive, Reason: "current premium direct transport"},
 		{Name: "webrtc-datachannel", Kind: "p2p-sctp", Status: providerStatusAvailable, Reason: "current screen/input fallback transport"},
 		{Name: "websocket", Kind: "tcp-fallback", Status: providerStatusAvailable, Reason: "legacy relay fallback"},
-		{Name: "webtransport-quic", Kind: "quic-relay", Status: providerStatusPlanned, Reason: "reserved for HTTP/3/WebTransport relay provider"},
+		{Name: "webtransport-quic", Kind: "quic-relay", Status: providerStatusPlanned, Reason: "reserved for the monolithic HTTP/3/WebTransport relay path"},
 	}
 	configured := configuredProvider("UNYDESK_TRANSPORT_PROVIDER")
 	switch configured {

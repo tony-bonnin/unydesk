@@ -1,7 +1,6 @@
 package server
 
 import (
-	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +31,8 @@ import (
 
 //go:embed assets/*
 var embeddedAssets embed.FS
+
+var frontendAssetRefPattern = regexp.MustCompile(`((?:href|src)=["'])(/[^"'?#]+\.(?:css|js|mjs|ico|jpg|jpeg|png|svg|webp))(?:\?[^"']*)?(["'])`)
 
 const (
 	csrfCookieName         = "unydesk_csrf"
@@ -69,7 +71,6 @@ type screenRelay struct {
 func (c *hostConn) writeJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.conn.EnableWriteCompression(true)
 	return c.conn.WriteJSON(v)
 }
 
@@ -115,7 +116,7 @@ func resolveRequestHostIPv4(r *http.Request) string {
 }
 
 func resolveRequestClientIPv4(r *http.Request) string {
-	for _, headerName := range []string{"X-Forwarded-For", "X-Real-IP"} {
+	for _, headerName := range []string{"X-UnyDesk-Client-IP", "CF-Connecting-IP", "True-Client-IP", "X-Client-IP", "X-Forwarded-For", "X-Real-IP"} {
 		raw := strings.TrimSpace(r.Header.Get(headerName))
 		if raw == "" {
 			continue
@@ -126,7 +127,34 @@ func resolveRequestClientIPv4(r *http.Request) string {
 			}
 		}
 	}
+	if ip := parseForwardedIPv4(r.Header.Get("Forwarded")); ip != "" {
+		return ip
+	}
 	return parseIPv4(r.RemoteAddr)
+}
+
+func parseForwardedIPv4(value string) string {
+	for _, entry := range strings.Split(value, ",") {
+		for _, part := range strings.Split(entry, ";") {
+			key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "for") {
+				continue
+			}
+			candidate := strings.Trim(strings.TrimSpace(rawValue), `"`)
+			if strings.HasPrefix(candidate, "_") {
+				continue
+			}
+			if strings.HasPrefix(candidate, "[") {
+				if end := strings.Index(candidate, "]"); end >= 0 {
+					candidate = candidate[1:end]
+				}
+			}
+			if ip := parseIPv4(candidate); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
 }
 
 func parseIPv4(value string) string {
@@ -212,15 +240,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":                     s.cfg.Name,
-		"version":                  config.Version,
-		"listen_addr":              s.cfg.ListenAddr,
-		"host_ipv4":                resolveRequestHostIPv4(r),
-		"client_ipv4":              resolveRequestClientIPv4(r),
-		"allow_origin":             s.cfg.Security.AllowOrigin,
-		"session_ttl":              s.cfg.Remote.SessionTTLMinutes,
-		"public_id":                s.publicID,
-		"host_heartbeat_seconds":   s.cfg.Remote.HostHeartbeatSeconds,
+		"name":                   s.cfg.Name,
+		"version":                config.Version,
+		"listen_addr":            s.cfg.ListenAddr,
+		"host_ipv4":              resolveRequestHostIPv4(r),
+		"client_ipv4":            resolveRequestClientIPv4(r),
+		"allow_origin":           s.cfg.Security.AllowOrigin,
+		"session_ttl":            s.cfg.Remote.SessionTTLMinutes,
+		"public_id":              s.publicID,
+		"host_heartbeat_seconds": s.cfg.Remote.HostHeartbeatSeconds,
+		"features":               s.cfg.Features,
+		"ice_servers":            s.cfg.WebRTC.ICEServers,
+		"webrtc": map[string]any{
+			"enabled":                s.cfg.Features.WebRTC,
+			"ice_servers":            s.cfg.WebRTC.ICEServers,
+			"preferred_video_codecs": s.cfg.Features.PreferredVideoCodecs,
+		},
+		"quic": map[string]any{
+			"enabled": s.cfg.Features.QUIC,
+			"mode":    "monolithic",
+			"status":  "reserved-monolithic",
+		},
 		"frontend_dir":             s.cfg.Paths.FrontendDir,
 		"frontend_live_reload":     true,
 		"frontend_reload_strategy": "serve-from-disk-and-refresh",
@@ -555,7 +595,12 @@ func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serve
 		ldflagsParts = append([]string{"-H=windowsgui"}, ldflagsParts...)
 	}
 	ldflags := strings.Join(ldflagsParts, " ")
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags", ldflags, "-o", outPath, "./cmd/unydesk-host")
+	args := []string{"build", "-trimpath"}
+	if hostFFmpegEmbedAvailable(wd, spec.goos, spec.goarch) {
+		args = append(args, "-tags", "ffmpegembed")
+	}
+	args = append(args, "-ldflags", ldflags, "-o", outPath, "./cmd/unydesk-host")
+	cmd := exec.Command("go", args...)
 	cmd.Dir = wd
 	cmd.Env = append(os.Environ(),
 		"CGO_ENABLED=0",
@@ -568,6 +613,15 @@ func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serve
 		return "", fmt.Errorf("go build failed: %s", strings.TrimSpace(string(output)))
 	}
 	return outPath, nil
+}
+
+func hostFFmpegEmbedAvailable(root, goos, goarch string) bool {
+	if goos != "windows" || goarch != "amd64" {
+		return false
+	}
+	path := filepath.Join(root, "cmd", "unydesk-host", "embedded", "ffmpeg", "windows-amd64", "ffmpeg.exe.gz")
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
 }
 
 func hostBinarySourceFingerprint(root string) string {
@@ -604,6 +658,9 @@ func hostBinarySourceFingerprint(root string) string {
 }
 
 func baseServerURL(r *http.Request) string {
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_PUBLIC_SERVER")); value != "" {
+		return strings.TrimRight(value, "/")
+	}
 	scheme := "http"
 	if requestIsHTTPS(r) {
 		scheme = "https"
@@ -716,8 +773,7 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
-		CheckOrigin:       func(_ *http.Request) bool { return true },
-		EnableCompression: true,
+		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -725,8 +781,6 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	conn.EnableWriteCompression(true)
-	_ = conn.SetCompressionLevel(flate.BestSpeed)
 
 	var hello remote.HostWireMessage
 	if err := conn.ReadJSON(&hello); err != nil {
@@ -747,7 +801,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 	liveConn := &hostConn{conn: conn}
 	s.setHostConn(host.ID, liveConn)
 	defer s.clearHostConn(host.ID, liveConn)
-	s.logger.Info("host registered over ws", "host_id", host.ID, "public_id", host.PublicID, "hostname", host.Hostname)
+	s.logger.Info("host registered over ws", "host_id", host.ID, "public_id", host.PublicID, "hostname", host.Hostname, "version", host.Version, "os", host.OS, "arch", host.Arch)
 	if err := liveConn.writeJSON(remote.HostWireMessage{
 		Type:     "registered",
 		HostID:   host.ID,
@@ -835,6 +889,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "session_id and payload are required"})
 				return
 			}
+			s.logHostSessionEvent(host, msg.SessionID, msg.Payload)
 			if err := s.broadcastSessionEvent(msg.SessionID, msg.Payload); err != nil {
 				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: err.Error()})
 				return
@@ -847,8 +902,34 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) logHostSessionEvent(host remote.Host, sessionID string, payload json.RawMessage) {
+	var event map[string]any
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return
+	}
+	eventType := strings.TrimSpace(fmt.Sprint(event["type"]))
+	if eventType != "screen_status" && eventType != "screen_error" {
+		return
+	}
+	s.logger.Info(
+		"host session diagnostic",
+		"host_id", host.ID,
+		"hostname", host.Hostname,
+		"session_id", sessionID,
+		"type", eventType,
+		"transport", strings.TrimSpace(fmt.Sprint(event["transport"])),
+		"action", strings.TrimSpace(fmt.Sprint(event["action"])),
+		"trigger", strings.TrimSpace(fmt.Sprint(event["trigger"])),
+		"error", strings.TrimSpace(fmt.Sprint(event["error"])),
+	)
+}
+
 func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+	if strings.Trim(path, "/") == "" {
+		s.handleSessions(w, r)
+		return
+	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "session not found")
@@ -1221,10 +1302,15 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	session, err := s.store.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin:       func(_ *http.Request) bool { return true },
-		EnableCompression: true,
+		EnableCompression: false,
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -1232,18 +1318,7 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	defer conn.Close()
-	conn.EnableWriteCompression(true)
-	_ = conn.SetCompressionLevel(flate.BestSpeed)
 	viewerConn := &hostConn{conn: conn}
-
-	session, err := s.store.Get(id)
-	if err != nil {
-		_ = viewerConn.writeJSON(map[string]any{
-			"type":  "error",
-			"error": "session not found",
-		})
-		return
-	}
 
 	updates, cancel := s.store.SubscribeSession(id)
 	defer cancel()
@@ -1404,9 +1479,47 @@ func (s *Server) forwardControlToHost(sessionID string, payload json.RawMessage)
 
 func (s *Server) withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		if shouldLogRequest(r) {
+			s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func shouldLogRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return true
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if isNoisySessionRead(path) || isStaticFrontendRead(path) {
+		return false
+	}
+	return true
+}
+
+func isNoisySessionRead(path string) bool {
+	trimmed := strings.Trim(path, "/")
+	if !strings.HasPrefix(trimmed, "api/v1/sessions/") {
+		return false
+	}
+	rest := strings.TrimPrefix(trimmed, "api/v1/sessions/")
+	if rest == "" {
+		return false
+	}
+	if !strings.Contains(rest, "/") {
+		return true
+	}
+	return strings.HasSuffix(rest, "/ws")
+}
+
+func isStaticFrontendRead(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".css", ".js", ".ico", ".jpg", ".jpeg", ".png", ".svg", ".webp", ".woff", ".woff2":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) withCORS(next http.Handler) http.Handler {
@@ -1525,7 +1638,7 @@ func (s *Server) registerFrontendRoutes(mux *http.ServeMux) {
 
 func (s *Server) registerDiskFrontend(mux *http.ServeMux, frontendDir string) {
 	mux.Handle("/account", s.requireAuthPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, filepath.Join(frontendDir, "account", "index.html"))
+		serveFrontendHTML(w, r, frontendDir, filepath.Join(frontendDir, "account", "index.html"))
 	})))
 	mux.Handle("/account/", s.requireAuthPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
@@ -1534,23 +1647,27 @@ func (s *Server) registerDiskFrontend(mux *http.ServeMux, frontendDir string) {
 			if info.IsDir() {
 				indexPath := filepath.Join(target, "index.html")
 				if indexInfo, indexErr := os.Stat(indexPath); indexErr == nil && !indexInfo.IsDir() {
-					http.ServeFile(w, r, indexPath)
+					serveFrontendHTML(w, r, frontendDir, indexPath)
 					return
 				}
 			}
 			if !info.IsDir() {
-				http.ServeFile(w, r, target)
+				if strings.EqualFold(filepath.Ext(target), ".html") {
+					serveFrontendHTML(w, r, frontendDir, target)
+					return
+				}
+				serveFrontendFile(w, r, target)
 				return
 			}
 		}
-		http.ServeFile(w, r, filepath.Join(frontendDir, "account", "index.html"))
+		serveFrontendHTML(w, r, frontendDir, filepath.Join(frontendDir, "account", "index.html"))
 	})))
 
 	for _, dir := range []string{"assets", "vendor", "fonts", "webfonts", "static", "media", "css", "app"} {
 		prefix := "/" + dir + "/"
 		dirPath := filepath.Join(frontendDir, dir)
 		if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
-			mux.Handle(prefix, http.StripPrefix(prefix, http.FileServer(http.Dir(dirPath))))
+			mux.Handle(prefix, http.StripPrefix(prefix, cachedFrontendFileServer(dirPath)))
 		}
 	}
 
@@ -1559,12 +1676,91 @@ func (s *Server) registerDiskFrontend(mux *http.ServeMux, frontendDir string) {
 		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
 			path := "/" + name
 			mux.Handle(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.ServeFile(w, r, filePath)
+				serveFrontendFile(w, r, filePath)
 			}))
 		}
 	}
 
 	mux.Handle("/", spaFallbackDir(frontendDir))
+}
+
+func cachedFrontendFileServer(root string) http.Handler {
+	files := http.FileServer(http.Dir(root))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setFrontendCacheHeaders(w, r, r.URL.Path)
+		files.ServeHTTP(w, r)
+	})
+}
+
+func serveFrontendFile(w http.ResponseWriter, r *http.Request, path string) {
+	setFrontendCacheHeaders(w, r, path)
+	http.ServeFile(w, r, path)
+}
+
+func serveFrontendHTML(w http.ResponseWriter, r *http.Request, frontendDir, path string) {
+	setFrontendCacheHeaders(w, r, path)
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	content = injectFrontendAssetVersions(content, frontendDir)
+	_, _ = w.Write(content)
+}
+
+func injectFrontendAssetVersions(content []byte, frontendDir string) []byte {
+	return frontendAssetRefPattern.ReplaceAllFunc(content, func(match []byte) []byte {
+		parts := frontendAssetRefPattern.FindSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+
+		assetPath := string(parts[2])
+		version := frontendAssetVersion(frontendDir, assetPath)
+		if version == "" {
+			return match
+		}
+
+		return []byte(string(parts[1]) + assetPath + "?v=" + version + string(parts[3]))
+	})
+}
+
+func frontendAssetVersion(frontendDir, assetPath string) string {
+	relPath := filepath.Clean(strings.TrimPrefix(assetPath, "/"))
+	fullPath := filepath.Join(frontendDir, filepath.FromSlash(relPath))
+	relative, err := filepath.Rel(frontendDir, fullPath)
+	if err != nil || strings.HasPrefix(relative, "..") {
+		return ""
+	}
+
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+
+	return fmt.Sprintf("%x-%x", info.ModTime().UTC().Unix(), info.Size())
+}
+
+func setFrontendCacheHeaders(w http.ResponseWriter, r *http.Request, path string) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if r.URL.RawQuery != "" && ext != "" && ext != ".html" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+
+	switch ext {
+	case ".html", "":
+		w.Header().Set("Cache-Control", "no-cache")
+	case ".js", ".css":
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	case ".woff", ".woff2", ".ttf", ".otf":
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	}
 }
 
 func spaFallbackDir(frontendDir string) http.Handler {
@@ -1588,20 +1784,22 @@ func spaFallbackDir(frontendDir string) http.Handler {
 				if info.IsDir() {
 					indexPath := filepath.Join(candidate, "index.html")
 					if indexInfo, indexErr := os.Stat(indexPath); indexErr == nil && !indexInfo.IsDir() {
-						w.Header().Set("Content-Type", "text/html; charset=utf-8")
-						http.ServeFile(w, r, indexPath)
+						serveFrontendHTML(w, r, frontendDir, indexPath)
 						return
 					}
 				}
 				if !info.IsDir() {
-					http.ServeFile(w, r, candidate)
+					if strings.EqualFold(filepath.Ext(candidate), ".html") {
+						serveFrontendHTML(w, r, frontendDir, candidate)
+						return
+					}
+					serveFrontendFile(w, r, candidate)
 					return
 				}
 			}
 		}
 
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		http.ServeFile(w, r, filepath.Join(frontendDir, "index.html"))
+		serveFrontendHTML(w, r, frontendDir, filepath.Join(frontendDir, "index.html"))
 	})
 }
 

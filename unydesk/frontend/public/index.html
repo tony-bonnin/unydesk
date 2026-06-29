@@ -6,10 +6,15 @@
   <title>UnyDesk | SelfHosted Free Access</title>
   <meta name="theme-color" content="#3e3aab">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
-  <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
-  <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
-  <link rel="stylesheet" href="/styles.css">
-  <script defer src="/app.js"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260629-card-radius">
+  <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
+  <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
+  <noscript>
+    <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
+    <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
+  </noscript>
+  <script defer src="/deferred-styles.js"></script>
+  <script defer src="/app.js?v=20260629-client-ip-fallback"></script>
   <script defer src="/vendor/alpinejs-csp.min.js"></script>
 </head>
 <body x-data="unydeskLanding()" x-init="boot()">
@@ -106,7 +111,10 @@
           <strong x-text="downloadTitle()"></strong>
           <p>Detected in your browser. If needed, open the full download list.</p>
           <div class="download-actions">
-            <a class="download-link" :href="downloadChoice.href" x-text="downloadChoice.cta" :aria-disabled="downloadChoice.href === '#' ? 'true' : 'false'"></a>
+            <a class="download-link" :href="downloadChoice.href" :aria-disabled="downloadChoice.href === '#' ? 'true' : 'false'">
+              <i :class="downloadChoice.icon || 'fa-solid fa-download'"></i>
+              <span x-text="downloadChoice.cta"></span>
+            </a>
             <button class="btn btn-secondary" type="button" @click="openDownloads()">All host downloads</button>
           </div>
           <div class="download-meta" x-text="downloadChoice.meta"></div>
@@ -130,7 +138,7 @@
               <input class="auth-input" type="text" :value="browserIdentity.public_id" readonly>
             </label>
             <label class="auth-label">
-              <span><i class="bi bi-broadcast-pin"></i> Target Host ID</span>
+              <span><i class="fa-solid fa-tower-broadcast"></i> Target Host ID</span>
               <input class="auth-input" type="text" placeholder="097 845 659 or host name" x-model="standaloneTarget" @keydown.enter="openStandaloneClient()">
             </label>
             <div class="session-inline-actions standalone-actions">
@@ -169,8 +177,14 @@
                 <span x-text="item.description"></span>
               </div>
               <div class="download-actions">
-                <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">Download</a>
-                <a class="download-link secondary" x-show="item.archiveHref" :href="item.archiveHref">ZIP</a>
+                <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">
+                  <i :class="item.icon || 'fa-solid fa-download'"></i>
+                  <span>Download</span>
+                </a>
+                <a class="download-link secondary" x-show="item.archiveHref" :href="item.archiveHref">
+                  <i class="fa-solid fa-file-zipper"></i>
+                  <span>ZIP</span>
+                </a>
               </div>
             </div>
           </template>

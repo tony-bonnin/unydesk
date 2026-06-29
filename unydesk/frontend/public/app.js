@@ -14,6 +14,7 @@ document.addEventListener('alpine:init', () => {
       public_id: 'Loading…',
       token: '',
     },
+    browserLocalIPv4: '',
     standaloneTarget: '',
     standalonePassword: '',
     standaloneStatus: 'No account required. Open a standalone client in a new tab.',
@@ -47,14 +48,15 @@ document.addEventListener('alpine:init', () => {
       cta: 'Preparing suggestion…',
       label: 'Detecting system',
       meta: 'Waiting for browser detection.',
+      icon: 'fa-solid fa-download',
     },
     downloads: [
-      { title: 'Host for Linux amd64', description: 'Stripped static binary for Alpine-friendly deployments.', href: '/download/host/linux-amd64', archiveHref: '/download/host/linux-amd64.zip', secondary: false },
-      { title: 'Host for Linux arm64', description: 'Same host flow for ARM targets and lightweight edge nodes.', href: '/download/host/linux-arm64', archiveHref: '/download/host/linux-arm64.zip', secondary: false },
-      { title: 'Host for Windows amd64', description: 'Standard 64-bit Windows host binary for desktop and server editions.', href: '/download/host/windows-amd64', archiveHref: '/download/host/windows-amd64.zip', secondary: true },
-      { title: 'Host for Windows arm64', description: 'Windows on ARM build for newer ARM laptops and tablets.', href: '/download/host/windows-arm64', archiveHref: '/download/host/windows-arm64.zip', secondary: true },
-      { title: 'Host for macOS Intel', description: 'Darwin build for Intel-based Mac systems.', href: '/download/host/macos-amd64', archiveHref: '/download/host/macos-amd64.zip', secondary: true },
-      { title: 'Host for macOS Apple Silicon', description: 'Darwin build for Apple Silicon systems.', href: '/download/host/macos-arm64', archiveHref: '/download/host/macos-arm64.zip', secondary: true },
+      { title: 'Host for Linux 64-bits', description: 'Static binary for major x86_64 Linux distributions.', href: '/download/host/linux-amd64', archiveHref: '/download/host/linux-amd64.zip', secondary: false, icon: 'fa-brands fa-linux' },
+      { title: 'Host for Linux ARM64', description: 'Same host flow for ARM targets and lightweight edge nodes.', href: '/download/host/linux-arm64', archiveHref: '/download/host/linux-arm64.zip', secondary: false, icon: 'fa-brands fa-linux' },
+      { title: 'Host for Windows 64-bits', description: 'Standard 64-bit Windows host binary for desktop and server editions.', href: '/download/host/windows-amd64', archiveHref: '/download/host/windows-amd64.zip', secondary: true, icon: 'fa-brands fa-windows' },
+      { title: 'Host for Windows ARM64', description: 'Windows on ARM build for newer ARM laptops and tablets.', href: '/download/host/windows-arm64', archiveHref: '/download/host/windows-arm64.zip', secondary: true, icon: 'fa-brands fa-windows' },
+      { title: 'Host for macOS Intel', description: 'Darwin build for Intel-based Mac systems.', href: '/download/host/macos-amd64', archiveHref: '/download/host/macos-amd64.zip', secondary: true, icon: 'fa-brands fa-apple' },
+      { title: 'Host for macOS Apple Silicon', description: 'Darwin build for Apple Silicon systems.', href: '/download/host/macos-arm64', archiveHref: '/download/host/macos-arm64.zip', secondary: true, icon: 'fa-brands fa-apple' },
     ],
 
     async boot() {
@@ -68,6 +70,7 @@ document.addEventListener('alpine:init', () => {
       this.ensureStandalonePassword();
       this.applyPairedDownloads();
       await this.loadInfo();
+      this.detectBrowserLocalIPv4();
       this.resolveDownloadChoice();
     },
 
@@ -122,6 +125,81 @@ document.addEventListener('alpine:init', () => {
         }
       } catch (error) {
       }
+    },
+
+    async detectBrowserLocalIPv4() {
+      const ip = await this.readBrowserLocalIPv4();
+      if (ip) this.browserLocalIPv4 = ip;
+    },
+
+    async readBrowserLocalIPv4() {
+      const PeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+      if (!PeerConnection) return '';
+
+      const candidates = new Set();
+      const addCandidate = (candidate) => {
+        const text = `${candidate || ''}`;
+        for (const match of text.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)) {
+          const ip = match[0];
+          if (this.isPrivateIPv4(ip)) candidates.add(ip);
+        }
+      };
+
+      let pc;
+      try {
+        pc = new PeerConnection({ iceServers: [] });
+        pc.createDataChannel('uny-local-ip');
+        pc.addEventListener('icecandidate', (event) => {
+          if (event.candidate) addCandidate(event.candidate.candidate);
+        });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        if (offer && offer.sdp) addCandidate(offer.sdp);
+
+        await new Promise((resolve) => {
+          const done = () => resolve();
+          pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete') done();
+          });
+          window.setTimeout(done, 1200);
+        });
+
+        if (pc.localDescription && pc.localDescription.sdp) addCandidate(pc.localDescription.sdp);
+        if (pc.getStats) {
+          const stats = await pc.getStats();
+          stats.forEach((stat) => {
+            if (stat.type !== 'local-candidate') return;
+            addCandidate(stat.address || stat.ip || stat.relatedAddress || '');
+          });
+        }
+      } catch (_error) {
+      } finally {
+        if (pc) pc.close();
+      }
+
+      return this.preferredPrivateIPv4([...candidates]);
+    },
+
+    preferredPrivateIPv4(ips) {
+      return ips
+        .map((ip) => ({ ip, score: this.privateIPv4Score(ip) }))
+        .filter((entry) => entry.score > 0)
+        .sort((a, b) => b.score - a.score || a.ip.localeCompare(b.ip))[0]?.ip || '';
+    },
+
+    isPrivateIPv4(ip) {
+      return this.privateIPv4Score(ip) > 0;
+    },
+
+    privateIPv4Score(ip) {
+      const parts = `${ip || ''}`.split('.').map((part) => Number(part));
+      if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return 0;
+      const [a, b] = parts;
+      if (a === 192 && b === 168) return 40;
+      if (a === 10) return 30;
+      if (a === 172 && b >= 16 && b <= 31) return 20;
+      return 0;
     },
 
     generateStandalonePassword() {
@@ -225,10 +303,9 @@ document.addEventListener('alpine:init', () => {
       return window.location.host || '127.0.0.1:8890';
     },
 
-    hostIP() {
-      if (this.info.host_ipv4) return this.info.host_ipv4;
+    directAddressHost() {
       const host = this.directAddress();
-      if (!host) return '127.0.0.1';
+      if (!host) return '';
       if (host.startsWith('[')) {
         const end = host.indexOf(']');
         return end > 0 ? host.slice(1, end) : host;
@@ -236,12 +313,19 @@ document.addEventListener('alpine:init', () => {
       return host.split(':')[0] || host;
     },
 
+    hostIP() {
+      if (this.info.host_ipv4) return this.info.host_ipv4;
+      const host = this.directAddressHost();
+      if (!host) return '127.0.0.1';
+      return host;
+    },
+
     hostIPDisplay(limit = 18) {
       return this.truncateAddress(this.hostIP(), limit);
     },
 
     clientIP() {
-      return this.info.client_ipv4 || this.hostIP();
+      return this.browserLocalIPv4 || this.info.client_ipv4 || 'Detecting...';
     },
 
     clientIPDisplay(limit = 18) {
@@ -313,11 +397,63 @@ document.addEventListener('alpine:init', () => {
     },
 
     sortedHosts() {
-      return [...this.hosts].sort((a, b) => new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime());
+      return [...this.hosts].sort((a, b) => this.compareHostsStable(a, b));
+    },
+
+    compareHostsStable(a, b) {
+      const leftRegistered = this.hostRegisteredAtTime(a);
+      const rightRegistered = this.hostRegisteredAtTime(b);
+      if (leftRegistered !== rightRegistered) return leftRegistered - rightRegistered;
+      return this.hostStableSortKey(a).localeCompare(this.hostStableSortKey(b));
+    },
+
+    hostRegisteredAtTime(host) {
+      const value = new Date((host && host.registered_at) || '').getTime();
+      return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+    },
+
+    hostStableSortKey(host) {
+      return [
+        host && host.hostname,
+        host && host.name,
+        host && host.public_id,
+        host && host.install_id,
+        host && host.id,
+      ].map((part) => String(part || '').trim().toLowerCase()).join('\u0000');
     },
 
     hostMeta(host) {
-      return `${host.os || '?'}\/${host.arch || '?'} · ${host.version || '?'}`;
+      return `${this.hostPlatformLabel(host)} · ${host.version || '?'}`;
+    },
+
+    hostPlatformLabel(host) {
+      const os = this.hostOSLabel(host && host.os);
+      const arch = this.hostArchLabel(host && host.arch);
+      if (os === '?' && arch === '?') return '?';
+      if (os === '?') return arch;
+      if (arch === '?') return os;
+      return `${os} ${arch}`;
+    },
+
+    hostOSLabel(value) {
+      const raw = String(value || '').trim();
+      const osName = raw.toLowerCase();
+      if (!osName) return '?';
+      const distro = this.detectLinuxDistribution(osName);
+      if (distro.confident) return distro.name.includes('Linux') ? distro.name : `${distro.name} Linux`;
+      if (osName.includes('windows')) return 'Windows';
+      if (osName.includes('darwin') || osName.includes('mac') || osName.includes('osx')) return 'macOS';
+      if (osName.includes('linux')) return 'Linux';
+      return raw;
+    },
+
+    hostArchLabel(value) {
+      const arch = String(value || '').trim().toLowerCase();
+      if (!arch) return '?';
+      if (['amd64', 'x86_64', 'x64'].includes(arch)) return '64-bits';
+      if (['386', 'i386', 'i686', 'x86'].includes(arch)) return '32-bits';
+      if (['arm64', 'aarch64'].includes(arch)) return 'ARM64';
+      return value;
     },
 
     hostStatus(host) {
@@ -352,7 +488,7 @@ document.addEventListener('alpine:init', () => {
       let choice = null;
       try {
         if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
-          const hints = await navigator.userAgentData.getHighEntropyValues(['architecture', 'bitness', 'platform']);
+          const hints = await navigator.userAgentData.getHighEntropyValues(['architecture', 'bitness', 'platform', 'platformVersion']);
           choice = this.detectFromClientHints(hints);
         }
       } catch (error) {
@@ -369,16 +505,17 @@ document.addEventListener('alpine:init', () => {
       const bitness = (hints.bitness || '').toLowerCase();
 
       if (platform.includes('windows')) {
-        if (arch.includes('arm')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows arm64', 'Download Windows arm64', 'Detected: Windows on ARM.');
-        return this.choice('/download/host/windows-amd64', 'Recommended host: Windows amd64', 'Download Windows amd64', 'Detected: Windows desktop.');
+        if (arch.includes('arm')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows ARM64', 'Download Windows ARM64', 'Detected: Windows on ARM.', 'fa-brands fa-windows');
+        return this.choice('/download/host/windows-amd64', 'Recommended host: Windows 64-bits', 'Download Windows 64-bits', 'Detected: Windows 64-bits.', 'fa-brands fa-windows');
       }
       if (platform.includes('mac')) {
-        if (arch.includes('arm')) return this.choice('/download/host/macos-arm64', 'Recommended host: macOS Apple Silicon', 'Download macOS Apple Silicon', 'Detected: macOS Apple Silicon.');
-        return this.choice('/download/host/macos-amd64', 'Recommended host: macOS Intel', 'Download macOS Intel', 'Detected: macOS Intel.');
+        if (arch.includes('arm')) return this.choice('/download/host/macos-arm64', 'Recommended host: macOS Apple Silicon', 'Download macOS Apple Silicon', 'Detected: macOS Apple Silicon.', 'fa-brands fa-apple');
+        return this.choice('/download/host/macos-amd64', 'Recommended host: macOS Intel', 'Download macOS Intel', 'Detected: macOS Intel.', 'fa-brands fa-apple');
       }
       if (platform.includes('linux')) {
-        if (arch.includes('arm')) return this.choice('/download/host/linux-arm64', 'Recommended host: Linux arm64', 'Download Linux arm64', 'Detected: Linux on ARM.');
-        if (arch.includes('x86') || arch.includes('amd') || bitness === '64') return this.choice('/download/host/linux-amd64', 'Recommended host: Linux amd64', 'Download Linux amd64', 'Detected: Linux x86_64.');
+        const distro = this.detectLinuxDistribution(`${navigator.userAgent || ''} ${navigator.platform || ''} ${hints.platformVersion || ''}`);
+        if (arch.includes('arm')) return this.linuxChoice('/download/host/linux-arm64', 'ARM64', distro);
+        if (arch.includes('x86') || arch.includes('amd') || bitness === '64') return this.linuxChoice('/download/host/linux-amd64', '64-bits', distro);
       }
       return null;
     },
@@ -387,22 +524,56 @@ document.addEventListener('alpine:init', () => {
       const source = `${navigator.userAgent || ''} ${navigator.platform || ''}`.toLowerCase();
 
       if (source.includes('windows')) {
-        if (source.includes('arm') || source.includes('aarch64')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows arm64', 'Download Windows arm64', 'Detected: Windows on ARM.');
-        return this.choice('/download/host/windows-amd64', 'Recommended host: Windows amd64', 'Download Windows amd64', 'Detected: Windows desktop.');
+        if (source.includes('arm') || source.includes('aarch64')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows ARM64', 'Download Windows ARM64', 'Detected: Windows on ARM.', 'fa-brands fa-windows');
+        return this.choice('/download/host/windows-amd64', 'Recommended host: Windows 64-bits', 'Download Windows 64-bits', 'Detected: Windows 64-bits.', 'fa-brands fa-windows');
       }
       if (source.includes('mac') || source.includes('darwin')) {
-        if (source.includes('arm') || source.includes('apple') || source.includes('aarch64')) return this.choice('/download/host/macos-arm64', 'Recommended host: macOS Apple Silicon', 'Download macOS Apple Silicon', 'Detected: macOS Apple Silicon.');
-        return this.choice('/download/host/macos-amd64', 'Recommended host: macOS Intel', 'Download macOS Intel', 'Detected: macOS Intel.');
+        if (source.includes('arm') || source.includes('apple') || source.includes('aarch64')) return this.choice('/download/host/macos-arm64', 'Recommended host: macOS Apple Silicon', 'Download macOS Apple Silicon', 'Detected: macOS Apple Silicon.', 'fa-brands fa-apple');
+        return this.choice('/download/host/macos-amd64', 'Recommended host: macOS Intel', 'Download macOS Intel', 'Detected: macOS Intel.', 'fa-brands fa-apple');
       }
       if (source.includes('linux') || source.includes('x11')) {
-        if (source.includes('arm') || source.includes('aarch64')) return this.choice('/download/host/linux-arm64', 'Recommended host: Linux arm64', 'Download Linux arm64', 'Detected: Linux on ARM.');
-        return this.choice('/download/host/linux-amd64', 'Recommended host: Linux amd64', 'Download Linux amd64', 'Detected: Linux desktop.');
+        const distro = this.detectLinuxDistribution(source);
+        if (source.includes('arm') || source.includes('aarch64')) return this.linuxChoice('/download/host/linux-arm64', 'ARM64', distro);
+        return this.linuxChoice('/download/host/linux-amd64', '64-bits', distro);
       }
-      return this.choice('/download/host/linux-amd64', 'Recommended host: Linux amd64', 'Download Linux amd64', 'Detection was unclear. This is the fallback choice.');
+      return this.choice('/download/host/linux-amd64', 'Recommended host: Linux 64-bits', 'Download Linux 64-bits', 'Detection was unclear. This is the fallback choice.', 'fa-brands fa-linux');
     },
 
-    choice(href, label, cta, meta) {
-      return { href: this.pairedDownloadHref(href), label, cta, meta };
+    linuxChoice(href, archLabel, distro) {
+      const distroSuffix = distro.confident ? ` (${distro.name})` : '';
+      const meta = distro.confident
+        ? `Detected: ${distro.name} Linux ${archLabel}.`
+        : `Detected: Linux ${archLabel}. Distribution not exposed by this browser.`;
+      return this.choice(href, `Recommended host: Linux ${archLabel}${distroSuffix}`, `Download Linux ${archLabel}`, meta, 'fa-brands fa-linux');
+    },
+
+    detectLinuxDistribution(source) {
+      const text = `${source || ''}`.toLowerCase();
+      const distributions = [
+        [/ubuntu/, 'Ubuntu'],
+        [/debian/, 'Debian'],
+        [/fedora/, 'Fedora'],
+        [/\brhel\b/, 'Red Hat Enterprise Linux'],
+        [/red\s*hat/, 'Red Hat Enterprise Linux'],
+        [/centos/, 'CentOS'],
+        [/rocky/, 'Rocky Linux'],
+        [/almalinux/, 'AlmaLinux'],
+        [/opensuse/, 'openSUSE'],
+        [/\bsuse\b/, 'SUSE Linux'],
+        [/\barch\b/, 'Arch Linux'],
+        [/manjaro/, 'Manjaro'],
+        [/alpine/, 'Alpine Linux'],
+        [/gentoo/, 'Gentoo'],
+        [/linux\s*mint/, 'Linux Mint'],
+        [/\bmint\b/, 'Linux Mint'],
+        [/pop[!_\s-]*os/, 'Pop!_OS'],
+      ];
+      const match = distributions.find(([pattern]) => pattern.test(text));
+      return match ? { name: match[1], confident: true } : { name: 'Linux', confident: false };
+    },
+
+    choice(href, label, cta, meta, icon = 'fa-solid fa-download') {
+      return { href: this.pairedDownloadHref(href), label, cta, meta, icon };
     },
 
     openLogin() {

@@ -6,10 +6,15 @@
   <title>UnyDesk | Standalone Client</title>
   <meta name="theme-color" content="#3e3aab">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
-  <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
-  <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
   <link rel="stylesheet" href="/styles.css">
-  <script defer src="/control.js"></script>
+  <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
+  <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
+  <noscript>
+    <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
+    <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
+  </noscript>
+  <script defer src="/deferred-styles.js?v=20260628-rtpdiag"></script>
+  <script defer src="/control.js?v=20260628-rtpdiag"></script>
 </head>
 <body class="account-app standalone-connect-page">
   <div class="account-dashboard-shell">

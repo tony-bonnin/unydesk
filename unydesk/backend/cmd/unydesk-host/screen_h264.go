@@ -51,7 +51,7 @@ func newH264ScreenTrack(pc *webrtc.PeerConnection, sessionID string) (*webrtc.Tr
 	track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
 		MimeType:    webrtc.MimeTypeH264,
 		ClockRate:   90000,
-		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e033",
+		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
 	}, "screen-video", "unydesk-screen")
 	if err != nil {
 		return nil, nil, err
@@ -77,11 +77,19 @@ func newH264ScreenTrack(pc *webrtc.PeerConnection, sessionID string) (*webrtc.Tr
 	return track, networkMonitor, nil
 }
 
-func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionID string, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, emitStatus func(map[string]any), emitError func(string)) {
+func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionID string, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, emitStatus func(map[string]any), emitError func(string), markFirstSample func()) {
 	ffmpegPath, ok := lookupFFmpegBinary()
 	if !ok {
 		message := "H.264 encoder unavailable: install ffmpeg.exe next to unydesk-host.exe or add FFmpeg to PATH."
 		fmt.Printf("H264 screen disabled for %s: ffmpeg not found\n", sessionID)
+		if emitStatus != nil {
+			emitStatus(map[string]any{
+				"type":      "screen_status",
+				"transport": "h264",
+				"action":    "encoder-unavailable",
+				"error":     "ffmpeg not found",
+			})
+		}
 		emitError(message)
 		return
 	}
@@ -91,7 +99,7 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 
 	profiles := h264AdaptiveProfiles()
 	capture := defaultCaptureProvider()
-	profileIndex := 0
+	profileIndex := h264InitialProfileIndex(profiles)
 	floorOverloads := 0
 	emitProfileStatus := func(action string, profile h264AdaptiveProfile, network *h264NetworkSnapshot) {
 		if emitStatus == nil {
@@ -133,7 +141,7 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 		profile := profiles[profileIndex]
 		pipeline := newScreenPipelineWithCapture(profile.screenPipelineProfile(), capture)
 		emitProfileStatus("profile", profile, nil)
-		err := runH264EncoderSession(ctx, done, sessionID, ffmpegPath, pipeline, track, networkMonitor, profile)
+		err := runH264EncoderSession(ctx, done, sessionID, ffmpegPath, pipeline, track, networkMonitor, profile, emitStatus, markFirstSample)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
@@ -191,7 +199,7 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 	}
 }
 
-func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID, ffmpegPath string, pipeline *screenPipeline, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, profile h264AdaptiveProfile) error {
+func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID, ffmpegPath string, pipeline *screenPipeline, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, profile h264AdaptiveProfile, emitStatus func(map[string]any), markFirstSample func()) error {
 	firstFrame, err := captureH264Frame(pipeline)
 	if err != nil {
 		return err
@@ -217,7 +225,16 @@ func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID,
 
 	args := h264FFmpegArgs(width, height, fps, profile)
 	fmt.Printf("H264 encoder starting for %s: profile=%s, %dx%d @ %dfps, CRF %d, preset %s, max frame age %s\n", sessionID, profile.Name, width, height, fps, profile.CRF, profile.Preset, profile.MaxFrameAge)
-	cmd := exec.CommandContext(encoderCtx, ffmpegPath, args...)
+	metrics := newRealtimeVideoMetrics("h264", sessionID, profile, emitStatus)
+	metrics.emitLifecycle("capture-ready", map[string]any{
+		"width":  width,
+		"height": height,
+	})
+	metrics.emitLifecycle("encoder-starting", map[string]any{
+		"encoder": "libx264",
+		"ffmpeg":  filepath.Base(ffmpegPath),
+	})
+	cmd := newBackgroundCommandContext(encoderCtx, ffmpegPath, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -231,17 +248,23 @@ func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID,
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		metrics.emitLifecycle("encoder-start-error", map[string]any{
+			"error": err.Error(),
+		})
 		return err
 	}
+	metrics.emitLifecycle("encoder-started", map[string]any{
+		"encoder": "libx264",
+	})
 
 	componentCount := 3
 	errCh := make(chan error, 5)
 	go logH264EncoderStderr(sessionID, stderr)
 	go func() {
-		errCh <- writeH264RawFrames(encoderCtx, done, pipeline, stdin, firstFrame, width, height, frameDuration, sessionID, profile)
+		errCh <- writeH264RawFrames(encoderCtx, done, pipeline, stdin, firstFrame, width, height, frameDuration, sessionID, profile, metrics)
 	}()
 	go func() {
-		errCh <- writeH264Samples(stdout, track, frameDuration, sessionID, profile)
+		errCh <- writeH264Samples(stdout, track, frameDuration, sessionID, profile, metrics, markFirstSample)
 	}()
 	go func() {
 		errCh <- cmd.Wait()
@@ -301,6 +324,9 @@ func lookupFFmpegBinary() (string, bool) {
 		}
 		candidates = append(candidates, filepath.Join(dir, "ffmpeg"))
 	}
+	if embedded, ok := embeddedFFmpegBinaryPath(); ok {
+		candidates = append(candidates, embedded)
+	}
 	if runtime.GOOS == "windows" {
 		candidates = append(candidates, "ffmpeg.exe")
 	}
@@ -322,9 +348,9 @@ func lookupFFmpegBinary() (string, bool) {
 
 func h264FFmpegArgs(width, height, fps int, profile h264AdaptiveProfile) []string {
 	gop := strconv.Itoa(maxInt(1, fps))
-	x264Params := fmt.Sprintf("keyint=%s:min-keyint=%s:scenecut=0:repeat-headers=1:aud=1:bframes=0:rc-lookahead=0:sync-lookahead=0:sliced-threads=1", gop, gop)
+	x264Params := fmt.Sprintf("keyint=%s:min-keyint=%s:scenecut=0:repeat-headers=1:aud=1:bframes=0:rc-lookahead=0:sync-lookahead=0:sliced-threads=1:force-cfr=1", gop, gop)
 	maxRate := fmt.Sprintf("%dk", profile.MaxRateKbps)
-	bufferSize := fmt.Sprintf("%dk", maxInt(500, profile.MaxRateKbps/2))
+	bufferSize := fmt.Sprintf("%dk", maxInt(250, profile.MaxRateKbps/8))
 	return []string{
 		"-hide_banner",
 		"-loglevel", "warning",
@@ -345,7 +371,8 @@ func h264FFmpegArgs(width, height, fps int, profile h264AdaptiveProfile) []strin
 		"-crf", strconv.Itoa(profile.CRF),
 		"-maxrate", maxRate,
 		"-bufsize", bufferSize,
-		"-threads", "0",
+		"-threads", strconv.Itoa(h264EncoderThreads()),
+		"-thread_type", "slice",
 		"-pix_fmt", "yuv420p",
 		"-profile:v", "baseline",
 		"-level", "5.1",
@@ -371,10 +398,10 @@ func (profile h264AdaptiveProfile) screenPipelineProfile() screenPipelineProfile
 }
 
 func h264AdaptiveProfiles() []h264AdaptiveProfile {
-	baseEdge := h264IntEnv("UNYDESK_H264_MAX_EDGE", 2880, 640, 4096)
-	baseFPS := h264IntEnv("UNYDESK_H264_FPS", 45, 10, 60)
-	baseCRF := h264IntEnv("UNYDESK_H264_CRF", 14, 12, 32)
-	baseMaxRate := h264IntEnv("UNYDESK_H264_MAXRATE_KBPS", 16000, 1000, 80000)
+	baseEdge := h264IntEnv("UNYDESK_H264_MAX_EDGE", 2560, 640, 4096)
+	baseFPS := h264IntEnv("UNYDESK_H264_FPS", 35, 10, 60)
+	baseCRF := h264IntEnv("UNYDESK_H264_CRF", 16, 12, 32)
+	baseMaxRate := h264IntEnv("UNYDESK_H264_MAXRATE_KBPS", 10000, 1000, 80000)
 	basePreset := h264Preset()
 	baseFrameAge := h264MaxFrameAge()
 
@@ -385,11 +412,27 @@ func h264AdaptiveProfiles() []h264AdaptiveProfile {
 	upgradeAfter := h264UpgradeAfter()
 	return []h264AdaptiveProfile{
 		newH264AdaptiveProfile("quality", baseEdge, baseFPS, baseCRF, basePreset, baseMaxRate, baseFrameAge, 0),
-		newH264AdaptiveProfile("balanced", minInt(baseEdge, 2560), minInt(baseFPS, 40), clampInt(baseCRF+1, 12, 32), basePreset, minInt(baseMaxRate, 10000), minDuration(baseFrameAge, 80*time.Millisecond), upgradeAfter),
-		newH264AdaptiveProfile("responsive", minInt(baseEdge, 2240), minInt(baseFPS, 35), clampInt(baseCRF+2, 12, 32), "ultrafast", minInt(baseMaxRate, 6500), minDuration(baseFrameAge, 70*time.Millisecond), upgradeAfter),
-		newH264AdaptiveProfile("recovery", minInt(baseEdge, 1920), minInt(baseFPS, 30), clampInt(baseCRF+4, 12, 32), "ultrafast", minInt(baseMaxRate, 4000), minDuration(baseFrameAge, 60*time.Millisecond), upgradeAfter),
-		newH264AdaptiveProfile("survival", minInt(baseEdge, 1600), minInt(baseFPS, 24), clampInt(baseCRF+6, 12, 32), "ultrafast", minInt(baseMaxRate, 2500), minDuration(baseFrameAge, 50*time.Millisecond), upgradeAfter),
+		newH264AdaptiveProfile("balanced", minInt(baseEdge, 2240), minInt(baseFPS, 32), clampInt(baseCRF+1, 12, 32), "ultrafast", minInt(baseMaxRate, 7000), minDuration(baseFrameAge, 60*time.Millisecond), upgradeAfter),
+		newH264AdaptiveProfile("responsive", minInt(baseEdge, 1920), minInt(baseFPS, 30), clampInt(baseCRF+3, 12, 32), "ultrafast", minInt(baseMaxRate, 4500), minDuration(baseFrameAge, 45*time.Millisecond), upgradeAfter),
+		newH264AdaptiveProfile("recovery", minInt(baseEdge, 1600), minInt(baseFPS, 24), clampInt(baseCRF+5, 12, 32), "ultrafast", minInt(baseMaxRate, 2600), minDuration(baseFrameAge, 40*time.Millisecond), upgradeAfter),
+		newH264AdaptiveProfile("survival", minInt(baseEdge, 1280), minInt(baseFPS, 20), clampInt(baseCRF+8, 12, 32), "ultrafast", minInt(baseMaxRate, 1500), minDuration(baseFrameAge, 35*time.Millisecond), upgradeAfter),
 	}
+}
+
+func h264InitialProfileIndex(profiles []h264AdaptiveProfile) int {
+	if len(profiles) == 0 {
+		return 0
+	}
+	name := strings.ToLower(strings.TrimSpace(os.Getenv("UNYDESK_H264_INITIAL_PROFILE")))
+	if name == "" {
+		name = "responsive"
+	}
+	for index, profile := range profiles {
+		if strings.EqualFold(profile.Name, name) {
+			return index
+		}
+	}
+	return minInt(2, len(profiles)-1)
 }
 
 func newH264AdaptiveProfile(name string, maxEdge, fps, crf int, preset string, maxRateKbps int, maxFrameAge, upgradeAfter time.Duration) h264AdaptiveProfile {
@@ -415,7 +458,7 @@ func h264AdaptiveEnabled() bool {
 }
 
 func h264UpgradeAfter() time.Duration {
-	seconds := h264IntEnv("UNYDESK_H264_UPSHIFT_AFTER_SEC", 12, 0, 300)
+	seconds := h264IntEnv("UNYDESK_H264_UPSHIFT_AFTER_SEC", 25, 0, 300)
 	if seconds <= 0 {
 		return 0
 	}
@@ -428,7 +471,7 @@ func h264OverloadWindow() time.Duration {
 }
 
 func h264Preset() string {
-	return normalizeH264Preset(os.Getenv("UNYDESK_H264_PRESET"), "superfast")
+	return normalizeH264Preset(os.Getenv("UNYDESK_H264_PRESET"), "ultrafast")
 }
 
 func normalizeH264Preset(raw, fallback string) string {
@@ -442,16 +485,25 @@ func normalizeH264Preset(raw, fallback string) string {
 }
 
 func h264MaxFrameAge() time.Duration {
-	ms := h264IntEnv("UNYDESK_H264_MAX_FRAME_AGE_MS", 90, 0, 1000)
+	ms := h264IntEnv("UNYDESK_H264_MAX_FRAME_AGE_MS", 55, 0, 1000)
 	if ms <= 0 {
 		return 0
 	}
 	return time.Duration(ms) * time.Millisecond
 }
 
+func h264EncoderThreads() int {
+	return h264IntEnv("UNYDESK_H264_THREADS", minInt(maxInt(runtime.NumCPU(), 1), 2), 1, 16)
+}
+
 func h264NetworkAdaptiveEnabled() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("UNYDESK_H264_NETWORK_ADAPTIVE")))
 	return raw != "0" && raw != "false" && raw != "off" && raw != "no"
+}
+
+func h264StartupTimeout() time.Duration {
+	ms := h264IntEnv("UNYDESK_H264_STARTUP_TIMEOUT_MS", 2500, 500, 15000)
+	return time.Duration(ms) * time.Millisecond
 }
 
 func h264NetworkLossThreshold() float64 {
@@ -719,6 +771,219 @@ type h264EncodedSample struct {
 	queuedAt time.Time
 }
 
+type realtimeVideoMetrics struct {
+	mu                 sync.Mutex
+	codec              string
+	sessionID          string
+	profile            h264AdaptiveProfile
+	emitStatus         func(map[string]any)
+	startedAt          time.Time
+	lastReportAt       time.Time
+	lastReportFrames   int64
+	lastReportBytes    int64
+	rawFrames          int64
+	rawDrops           int64
+	encodedFrames      int64
+	encodedBytes       int64
+	encodedDrops       int64
+	lastEncodeQueueAge time.Duration
+	maxEncodeQueueAge  time.Duration
+	firstSentAt        time.Time
+}
+
+type realtimeVideoMetricSnapshot struct {
+	codec         string
+	sessionID     string
+	profile       h264AdaptiveProfile
+	action        string
+	uptime        time.Duration
+	frames        int64
+	bytes         int64
+	rawFrames     int64
+	rawDrops      int64
+	encodedDrops  int64
+	fps           float64
+	kbps          float64
+	queueAge      time.Duration
+	maxQueueAge   time.Duration
+	firstFrameAge time.Duration
+	emitStatus    func(map[string]any)
+}
+
+func newRealtimeVideoMetrics(codec, sessionID string, profile h264AdaptiveProfile, emitStatus func(map[string]any)) *realtimeVideoMetrics {
+	return &realtimeVideoMetrics{
+		codec:      codec,
+		sessionID:  sessionID,
+		profile:    profile,
+		emitStatus: emitStatus,
+		startedAt:  time.Now(),
+	}
+}
+
+func (metrics *realtimeVideoMetrics) emitLifecycle(action string, fields map[string]any) {
+	if metrics == nil || metrics.emitStatus == nil || strings.TrimSpace(action) == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":      "screen_status",
+		"transport": metrics.codec,
+		"action":    action,
+		"profile":   metrics.profile.Name,
+		"fps":       metrics.profile.FPS,
+		"crf":       metrics.profile.CRF,
+		"max_edge":  metrics.profile.MaxEdge,
+		"maxrate":   metrics.profile.MaxRateKbps,
+		"age_ms":    metrics.profile.MaxFrameAge.Milliseconds(),
+		"uptime_ms": time.Since(metrics.startedAt).Milliseconds(),
+	}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	metrics.emitStatus(payload)
+}
+
+func (metrics *realtimeVideoMetrics) observeRawWrite() {
+	if metrics == nil {
+		return
+	}
+	first := false
+	metrics.mu.Lock()
+	metrics.rawFrames++
+	first = metrics.rawFrames == 1
+	metrics.mu.Unlock()
+	if first {
+		metrics.emitLifecycle("first-raw-frame", nil)
+	}
+}
+
+func (metrics *realtimeVideoMetrics) observeRawDrop(dropped int) {
+	if metrics == nil || dropped <= 0 {
+		return
+	}
+	metrics.mu.Lock()
+	metrics.rawDrops += int64(dropped)
+	metrics.mu.Unlock()
+}
+
+func (metrics *realtimeVideoMetrics) observeEncodedDrop(dropped int) {
+	if metrics == nil || dropped <= 0 {
+		return
+	}
+	metrics.mu.Lock()
+	metrics.encodedDrops += int64(dropped)
+	metrics.mu.Unlock()
+}
+
+func (metrics *realtimeVideoMetrics) observeEncodedSample(bytes int, queuedAt time.Time, advancesClock bool) {
+	if metrics == nil {
+		return
+	}
+	now := time.Now()
+	queueAge := time.Duration(0)
+	if !queuedAt.IsZero() {
+		queueAge = now.Sub(queuedAt)
+	}
+
+	var snapshot realtimeVideoMetricSnapshot
+	metrics.mu.Lock()
+	if advancesClock {
+		metrics.encodedFrames++
+	}
+	metrics.encodedBytes += int64(maxInt(0, bytes))
+	metrics.lastEncodeQueueAge = queueAge
+	if queueAge > metrics.maxEncodeQueueAge {
+		metrics.maxEncodeQueueAge = queueAge
+	}
+	firstFrame := advancesClock && metrics.firstSentAt.IsZero()
+	if firstFrame {
+		metrics.firstSentAt = now
+	}
+	due := firstFrame || metrics.lastReportAt.IsZero() || now.Sub(metrics.lastReportAt) >= 2*time.Second
+	if due {
+		elapsed := now.Sub(metrics.lastReportAt)
+		if metrics.lastReportAt.IsZero() {
+			elapsed = now.Sub(metrics.startedAt)
+		}
+		if elapsed <= 0 {
+			elapsed = time.Millisecond
+		}
+		deltaFrames := metrics.encodedFrames - metrics.lastReportFrames
+		deltaBytes := metrics.encodedBytes - metrics.lastReportBytes
+		snapshot = realtimeVideoMetricSnapshot{
+			codec:         metrics.codec,
+			sessionID:     metrics.sessionID,
+			profile:       metrics.profile,
+			action:        "stats",
+			uptime:        now.Sub(metrics.startedAt),
+			frames:        metrics.encodedFrames,
+			bytes:         metrics.encodedBytes,
+			rawFrames:     metrics.rawFrames,
+			rawDrops:      metrics.rawDrops,
+			encodedDrops:  metrics.encodedDrops,
+			fps:           float64(deltaFrames) / elapsed.Seconds(),
+			kbps:          float64(deltaBytes*8) / 1000 / elapsed.Seconds(),
+			queueAge:      metrics.lastEncodeQueueAge,
+			maxQueueAge:   metrics.maxEncodeQueueAge,
+			firstFrameAge: now.Sub(metrics.startedAt),
+			emitStatus:    metrics.emitStatus,
+		}
+		if firstFrame {
+			snapshot.action = "first-frame"
+		}
+		metrics.lastReportAt = now
+		metrics.lastReportFrames = metrics.encodedFrames
+		metrics.lastReportBytes = metrics.encodedBytes
+		metrics.maxEncodeQueueAge = 0
+	}
+	metrics.mu.Unlock()
+
+	if snapshot.sessionID != "" {
+		emitRealtimeVideoMetricSnapshot(snapshot)
+	}
+}
+
+func emitRealtimeVideoMetricSnapshot(snapshot realtimeVideoMetricSnapshot) {
+	fmt.Printf("%s video metrics for %s: action=%s profile=%s uptime=%s frames=%d raw_frames=%d fps=%.1f bitrate=%.0fkbps bytes=%d queue=%s max_queue=%s raw_drops=%d encoded_drops=%d\n",
+		strings.ToUpper(snapshot.codec),
+		snapshot.sessionID,
+		snapshot.action,
+		snapshot.profile.Name,
+		snapshot.uptime.Round(time.Millisecond),
+		snapshot.frames,
+		snapshot.rawFrames,
+		snapshot.fps,
+		snapshot.kbps,
+		snapshot.bytes,
+		snapshot.queueAge.Round(time.Millisecond),
+		snapshot.maxQueueAge.Round(time.Millisecond),
+		snapshot.rawDrops,
+		snapshot.encodedDrops,
+	)
+	if snapshot.emitStatus == nil {
+		return
+	}
+	snapshot.emitStatus(map[string]any{
+		"type":          "screen_status",
+		"transport":     snapshot.codec,
+		"action":        snapshot.action,
+		"profile":       snapshot.profile.Name,
+		"fps":           snapshot.profile.FPS,
+		"crf":           snapshot.profile.CRF,
+		"max_edge":      snapshot.profile.MaxEdge,
+		"maxrate":       snapshot.profile.MaxRateKbps,
+		"sent_fps":      snapshot.fps,
+		"sent_kbps":     snapshot.kbps,
+		"sent_frames":   snapshot.frames,
+		"sent_bytes":    snapshot.bytes,
+		"raw_frames":    snapshot.rawFrames,
+		"raw_drops":     snapshot.rawDrops,
+		"encoded_drops": snapshot.encodedDrops,
+		"queue_ms":      snapshot.queueAge.Milliseconds(),
+		"max_queue_ms":  snapshot.maxQueueAge.Milliseconds(),
+		"uptime_ms":     snapshot.uptime.Milliseconds(),
+	})
+}
+
 type h264OverloadTracker struct {
 	windowStart time.Time
 	window      time.Duration
@@ -746,7 +1011,7 @@ func (tracker *h264OverloadTracker) record(score int) bool {
 	return tracker.score >= tracker.threshold
 }
 
-func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *screenPipeline, writer io.WriteCloser, firstFrame *image.RGBA, width, height int, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile) error {
+func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *screenPipeline, writer io.WriteCloser, firstFrame *image.RGBA, width, height int, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile, metrics *realtimeVideoMetrics) error {
 	defer writer.Close()
 	frames := make(chan h264RawFrame, 1)
 	rawDropCh := make(chan int, 16)
@@ -768,6 +1033,7 @@ func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *scr
 			lastDropLogAt = time.Now()
 			fmt.Printf("H264 screen %s %s\n", sessionID, message)
 		}
+		metrics.observeRawDrop(score)
 		if overloadTracker.record(score) {
 			return errH264EncoderOverloaded
 		}
@@ -811,6 +1077,7 @@ func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *scr
 			if err := writeRGBAFrame(writer, frame.image, width, height); err != nil {
 				return err
 			}
+			metrics.observeRawWrite()
 		}
 	}
 }
@@ -900,8 +1167,8 @@ func contiguousRGBAFrameBytes(frame *image.RGBA, width, height int) ([]byte, boo
 	return out, true
 }
 
-func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile) error {
-	samples := make(chan h264EncodedSample, 2)
+func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile, metrics *realtimeVideoMetrics, markFirstSample func()) error {
+	samples := make(chan h264EncodedSample, 1)
 	encodedDropCh := make(chan int, 16)
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -910,7 +1177,7 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 	}()
 
 	lastDropLogAt := time.Time{}
-	lastSampleAt := time.Time{}
+	firstSampleMarked := false
 	overloadTracker := newH264OverloadTracker(profile.EncodedDropThreshold, profile.OverloadWindow)
 	recordDrop := func(score int, message string) error {
 		if score <= 0 {
@@ -920,6 +1187,7 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 			lastDropLogAt = time.Now()
 			fmt.Printf("H264 screen %s %s\n", sessionID, message)
 		}
+		metrics.observeEncodedDrop(score)
 		if overloadTracker.record(score) {
 			return errH264EncoderOverloaded
 		}
@@ -964,14 +1232,16 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 				}
 				continue
 			}
-			now := time.Now()
-			sampleDuration := frameDuration
-			if !lastSampleAt.IsZero() {
-				sampleDuration = clampDuration(now.Sub(lastSampleAt), frameDuration, 500*time.Millisecond)
-			}
-			lastSampleAt = now
-			if err := track.WriteSample(media.Sample{Data: sample.data, Duration: sampleDuration}); err != nil {
+			if err := track.WriteSample(media.Sample{Data: sample.data, Duration: frameDuration}); err != nil {
 				return err
+			}
+			metrics.observeEncodedSample(len(sample.data), sample.queuedAt, true)
+			if !firstSampleMarked {
+				firstSampleMarked = true
+				if markFirstSample != nil {
+					markFirstSample()
+				}
+				fmt.Printf("H264 first encoded frame sent for %s\n", sessionID)
 			}
 		case err := <-readErrCh:
 			if errors.Is(err, io.EOF) {
@@ -1089,11 +1359,15 @@ func h264NALIsVCL(unitType h264reader.NalUnitType) bool {
 }
 
 func logH264EncoderStderr(sessionID string, reader io.Reader) {
+	logVideoEncoderStderr("H264", sessionID, reader)
+}
+
+func logVideoEncoderStderr(codec, sessionID string, reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
-			fmt.Printf("H264 encoder %s: %s\n", sessionID, line)
+			fmt.Printf("%s encoder %s: %s\n", codec, sessionID, line)
 		}
 	}
 }

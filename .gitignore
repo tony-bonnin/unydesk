@@ -13,3 +13,7 @@ unydesk/backend/tmp/host-downloads/paired/
 # Interrupted zip/build commands may leave anonymous temporary files here.
 unydesk/backend/tmp/host-downloads/tmp*
 unydesk/backend/tmp/host-downloads/*.tmp
+
+# Generated embedded FFmpeg payloads are produced by docker-compose builds.
+unydesk/backend/cmd/unydesk-host/embedded/ffmpeg/*/ffmpeg.exe.gz
+unydesk/backend/tmp/ffmpeg-cache/

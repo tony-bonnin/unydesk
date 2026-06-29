@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -93,23 +94,58 @@ func (s *MemoryStore) Create(req CreateSessionRequest) Session {
 }
 
 func (s *MemoryStore) CreateRouted(req CreateSessionRequest, host *Host) Session {
-	session := s.Create(req)
-	if host == nil {
-		return session
+	now := time.Now().UTC()
+	var session Session
+	s.mu.Lock()
+	if existingID, ok := s.findMatchingSessionLocked(req); ok {
+		session = s.sessions[existingID]
+		if session.Status == StatusClosed {
+			session = resetSession(session, req, now)
+		} else {
+			session.Target = strings.TrimSpace(req.Target)
+			session.Viewer = strings.TrimSpace(req.Viewer)
+			session.ViewerAuthMode = normalizeSessionViewerAuthMode(req.ViewerAuthMode)
+			session.UpdatedAt = now
+		}
+	} else {
+		session = newSession(req, now)
 	}
 
-	s.mu.Lock()
-	session = s.sessions[session.ID]
-	session.RoutedHostID = host.ID
-	session.RoutedHostPublicID = host.PublicID
-	session.RoutedHostname = host.Hostname
-	session.DispatchState = "queued"
-	session.UpdatedAt = time.Now().UTC()
+	if host != nil {
+		hostChanged := strings.TrimSpace(session.RoutedHostID) != "" && session.RoutedHostID != host.ID
+		session.RoutedHostID = host.ID
+		session.RoutedHostPublicID = host.PublicID
+		session.RoutedHostname = host.Hostname
+		if hostChanged {
+			session.Status = StatusPending
+			session.OfferSDP = ""
+			session.AnswerSDP = ""
+			session.ViewerICECandidates = nil
+			session.HostICECandidates = nil
+			session.LastHostAckAt = nil
+		}
+		if session.DispatchState != "accepted" {
+			session.DispatchState = "queued"
+		}
+	}
+	session.UpdatedAt = now
 	s.sessions[session.ID] = session
 	s.mu.Unlock()
 
 	s.notifySessionUpdated(session)
 	return session
+}
+
+func newSession(req CreateSessionRequest, now time.Time) Session {
+	return Session{
+		ID:             newID(),
+		Target:         strings.TrimSpace(req.Target),
+		Viewer:         strings.TrimSpace(req.Viewer),
+		ViewerAuthMode: normalizeSessionViewerAuthMode(req.ViewerAuthMode),
+		Status:         StatusPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
 }
 
 func (s *MemoryStore) Get(id string) (Session, error) {
@@ -165,14 +201,26 @@ func (s *MemoryStore) ValidateStandaloneViewerToken(id, token string) bool {
 }
 
 func (s *MemoryStore) SetOffer(id string, sdp string) (Session, error) {
+	offer := strings.TrimSpace(sdp)
 	s.mu.Lock()
 	session, ok := s.sessions[id]
 	if !ok {
 		s.mu.Unlock()
 		return Session{}, ErrNotFound
 	}
-	session.OfferSDP = sdp
+	if strings.TrimSpace(session.OfferSDP) == offer {
+		s.mu.Unlock()
+		return session, nil
+	}
+	session.OfferSDP = offer
+	session.AnswerSDP = ""
+	session.ViewerICECandidates = nil
+	session.HostICECandidates = nil
 	session.Status = StatusOffered
+	if strings.TrimSpace(session.RoutedHostID) != "" {
+		session.DispatchState = "queued"
+		session.LastHostAckAt = nil
+	}
 	session.UpdatedAt = time.Now().UTC()
 	s.sessions[id] = session
 	s.mu.Unlock()
@@ -190,6 +238,9 @@ func (s *MemoryStore) SetAnswer(id string, sdp string) (Session, error) {
 	}
 	session.AnswerSDP = sdp
 	session.Status = StatusActive
+	if strings.TrimSpace(session.RoutedHostID) != "" {
+		session.DispatchState = "accepted"
+	}
 	session.UpdatedAt = time.Now().UTC()
 	s.sessions[id] = session
 	s.mu.Unlock()
@@ -199,6 +250,10 @@ func (s *MemoryStore) SetAnswer(id string, sdp string) (Session, error) {
 }
 
 func (s *MemoryStore) AddCandidate(id string, candidate string, source string) (Session, error) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return Session{}, ErrNotFound
+	}
 	s.mu.Lock()
 	session, ok := s.sessions[id]
 	if !ok {
@@ -207,8 +262,16 @@ func (s *MemoryStore) AddCandidate(id string, candidate string, source string) (
 	}
 	switch strings.TrimSpace(source) {
 	case "host":
+		if stringSliceContains(session.HostICECandidates, candidate) {
+			s.mu.Unlock()
+			return session, nil
+		}
 		session.HostICECandidates = append(session.HostICECandidates, candidate)
 	default:
+		if stringSliceContains(session.ViewerICECandidates, candidate) {
+			s.mu.Unlock()
+			return session, nil
+		}
 		session.ViewerICECandidates = append(session.ViewerICECandidates, candidate)
 	}
 	session.UpdatedAt = time.Now().UTC()
@@ -217,6 +280,15 @@ func (s *MemoryStore) AddCandidate(id string, candidate string, source string) (
 
 	s.notifySessionUpdated(session)
 	return session, nil
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *MemoryStore) SetScreenFrame(id, dataURL string, width, height int, captureError string) (Session, error) {
@@ -328,7 +400,13 @@ func (s *MemoryStore) FindHostByTarget(target string, timeout time.Duration) (Ho
 	defer s.mu.RUnlock()
 
 	now := time.Now().UTC()
+	hosts := make([]Host, 0, len(s.hosts))
 	for _, host := range s.hosts {
+		hosts = append(hosts, host)
+	}
+	sortHostsStable(hosts)
+
+	for _, host := range hosts {
 		host.Role = normalizeHostRole(host.Role)
 		host.Status = deriveHostStatus(host, timeout, now)
 		if host.Status != "online" {
@@ -598,6 +676,7 @@ func (s *MemoryStore) ListHosts() []Host {
 	for _, host := range s.hosts {
 		out = append(out, host)
 	}
+	sortHostsStable(out)
 	return out
 }
 
@@ -613,7 +692,46 @@ func (s *MemoryStore) ListHostsWithTimeout(timeout time.Duration) []Host {
 		cloned.Status = deriveHostStatus(cloned, timeout, now)
 		out = append(out, cloned)
 	}
+	sortHostsStable(out)
 	return out
+}
+
+func sortHostsStable(hosts []Host) {
+	sort.SliceStable(hosts, func(i, j int) bool {
+		left := hosts[i]
+		right := hosts[j]
+
+		if !left.RegisteredAt.Equal(right.RegisteredAt) {
+			if left.RegisteredAt.IsZero() {
+				return false
+			}
+			if right.RegisteredAt.IsZero() {
+				return true
+			}
+			return left.RegisteredAt.Before(right.RegisteredAt)
+		}
+
+		leftKey := hostStableSortKey(left)
+		rightKey := hostStableSortKey(right)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
+	})
+}
+
+func hostStableSortKey(host Host) string {
+	parts := []string{
+		host.Hostname,
+		host.Name,
+		host.PublicID,
+		host.InstallID,
+		host.ID,
+	}
+	for i, part := range parts {
+		parts[i] = strings.ToLower(strings.TrimSpace(part))
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func (s *MemoryStore) RegisterHost(req RegisterHostRequest) Host {

@@ -5,6 +5,18 @@ security:
 remote:
   session_ttl_minutes: 30
   host_heartbeat_seconds: 35
+webrtc:
+  ice_servers: []
+features:
+  webrtc: true
+  h265: true
+  h264: true
+  av1: true
+  quic: true
+  preferred_video_codecs:
+    - h264
+    - h265
+    - av1
 paths:
   public_id_file: settings/public-id
   host_downloads_dir: tmp/host-downloads
