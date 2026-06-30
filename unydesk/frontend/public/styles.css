@@ -41,6 +41,10 @@ button,
     cursor: pointer;
 }
 
+button.btn.btn-secondary i {
+    opacity: 0.25;
+}
+
 .shell {
     width: min(1500px, 100%);
     margin: 0 auto;
@@ -80,7 +84,7 @@ button,
     height: 100%;
     object-fit: cover;
     display: block;
-    max-width: 15rem;
+    max-width: 13.33rem;
 }
 
 .brand-copy strong {
@@ -129,6 +133,7 @@ button,
 .account-btn i:first-child {
     color: var(--brand-2);
     opacity: 0.15;
+    font-size: 1.33rem;
 }
 
 .hero {
@@ -387,13 +392,24 @@ p {
     font-size: 0.8rem;
 }
 .download-link i {
-    font-size: 0.95rem;
+    font-size: 1.33rem;
     line-height: 1;
 }
 .download-link span {
     line-height: 1;
 }
 .btn:hover, .download-link:hover { transform: translateY(-1px); }
+
+.download-link[aria-disabled="true"] {
+    opacity: 0.62;
+    cursor: not-allowed;
+    pointer-events: none;
+    box-shadow: none;
+}
+
+.download-link[aria-disabled="true"]:hover {
+    transform: none;
+}
 
 .btn-primary, .download-link {
     background: linear-gradient(135deg, var(--brand), #0800b1);
@@ -435,7 +451,12 @@ p {
 .auth-label i {
     color: var(--muted);
     font-size: 0.66rem;
-    opacity: 0.66;
+    opacity: 0.33;
+}
+
+.auth-label i.fa-solid.fa-tv {
+    position: relative;
+    top: 0.1rem;
 }
 
 i.bi.bi-key,

@@ -49,10 +49,12 @@ document.addEventListener('alpine:init', () => {
       label: 'Detecting system',
       meta: 'Waiting for browser detection.',
       icon: 'fa-solid fa-download',
+      disabled: false,
     },
     downloads: [
       { title: 'Host for Linux 64-bits', description: 'Static binary for major x86_64 Linux distributions.', href: '/download/host/linux-amd64', archiveHref: '/download/host/linux-amd64.zip', secondary: false, icon: 'fa-brands fa-linux' },
       { title: 'Host for Linux ARM64', description: 'Same host flow for ARM targets and lightweight edge nodes.', href: '/download/host/linux-arm64', archiveHref: '/download/host/linux-arm64.zip', secondary: false, icon: 'fa-brands fa-linux' },
+      { title: 'Host for Android', description: 'Android endpoint detected. Native APK is not published yet; use the standalone web client for now.', href: '#android-host', archiveHref: '', secondary: true, disabled: true, cta: 'Coming soon', icon: 'fa-brands fa-android' },
       { title: 'Host for Windows 64-bits', description: 'Standard 64-bit Windows host binary for desktop and server editions.', href: '/download/host/windows-amd64', archiveHref: '/download/host/windows-amd64.zip', secondary: true, icon: 'fa-brands fa-windows' },
       { title: 'Host for Windows ARM64', description: 'Windows on ARM build for newer ARM laptops and tablets.', href: '/download/host/windows-arm64', archiveHref: '/download/host/windows-arm64.zip', secondary: true, icon: 'fa-brands fa-windows' },
       { title: 'Host for macOS Intel', description: 'Darwin build for Intel-based Mac systems.', href: '/download/host/macos-amd64', archiveHref: '/download/host/macos-amd64.zip', secondary: true, icon: 'fa-brands fa-apple' },
@@ -366,6 +368,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     pairedDownloadHref(href) {
+      if (!href || String(href).startsWith('#')) return href || '#';
       try {
         const url = new URL(href, window.location.origin);
         if (this.browserIdentity.install_id) {
@@ -503,7 +506,11 @@ document.addEventListener('alpine:init', () => {
       const platform = (hints.platform || '').toLowerCase();
       const arch = (hints.architecture || '').toLowerCase();
       const bitness = (hints.bitness || '').toLowerCase();
+      const clientSource = `${navigator.userAgent || ''} ${navigator.platform || ''} ${hints.platformVersion || ''} ${arch} ${bitness}`.toLowerCase();
 
+      if (platform.includes('android') || clientSource.includes('android')) {
+        return this.androidChoice(this.androidArchLabel(clientSource));
+      }
       if (platform.includes('windows')) {
         if (arch.includes('arm')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows ARM64', 'Download Windows ARM64', 'Detected: Windows on ARM.', 'fa-brands fa-windows');
         return this.choice('/download/host/windows-amd64', 'Recommended host: Windows 64-bits', 'Download Windows 64-bits', 'Detected: Windows 64-bits.', 'fa-brands fa-windows');
@@ -513,7 +520,7 @@ document.addEventListener('alpine:init', () => {
         return this.choice('/download/host/macos-amd64', 'Recommended host: macOS Intel', 'Download macOS Intel', 'Detected: macOS Intel.', 'fa-brands fa-apple');
       }
       if (platform.includes('linux')) {
-        const distro = this.detectLinuxDistribution(`${navigator.userAgent || ''} ${navigator.platform || ''} ${hints.platformVersion || ''}`);
+        const distro = this.detectLinuxDistribution(clientSource);
         if (arch.includes('arm')) return this.linuxChoice('/download/host/linux-arm64', 'ARM64', distro);
         if (arch.includes('x86') || arch.includes('amd') || bitness === '64') return this.linuxChoice('/download/host/linux-amd64', '64-bits', distro);
       }
@@ -523,6 +530,9 @@ document.addEventListener('alpine:init', () => {
     detectFromUserAgent() {
       const source = `${navigator.userAgent || ''} ${navigator.platform || ''}`.toLowerCase();
 
+      if (source.includes('android')) {
+        return this.androidChoice(this.androidArchLabel(source));
+      }
       if (source.includes('windows')) {
         if (source.includes('arm') || source.includes('aarch64')) return this.choice('/download/host/windows-arm64', 'Recommended host: Windows ARM64', 'Download Windows ARM64', 'Detected: Windows on ARM.', 'fa-brands fa-windows');
         return this.choice('/download/host/windows-amd64', 'Recommended host: Windows 64-bits', 'Download Windows 64-bits', 'Detected: Windows 64-bits.', 'fa-brands fa-windows');
@@ -545,6 +555,26 @@ document.addEventListener('alpine:init', () => {
         ? `Detected: ${distro.name} Linux ${archLabel}.`
         : `Detected: Linux ${archLabel}. Distribution not exposed by this browser.`;
       return this.choice(href, `Recommended host: Linux ${archLabel}${distroSuffix}`, `Download Linux ${archLabel}`, meta, 'fa-brands fa-linux');
+    },
+
+    androidChoice(archLabel = '') {
+      const suffix = archLabel ? ` ${archLabel}` : '';
+      return this.choice(
+        '#android-host',
+        `Android detected${suffix}`,
+        'Android host coming soon',
+        `Detected: Android${suffix}. Native host APK is not published yet; use the standalone web client from this browser for now.`,
+        'fa-brands fa-android',
+        { disabled: true }
+      );
+    },
+
+    androidArchLabel(source) {
+      const text = String(source || '').toLowerCase();
+      if (text.includes('arm64') || text.includes('aarch64')) return 'ARM64';
+      if (text.includes('arm')) return 'ARM';
+      if (text.includes('x86_64') || text.includes('x64') || text.includes('amd64') || text.includes('64')) return '64-bits';
+      return '';
     },
 
     detectLinuxDistribution(source) {
@@ -572,8 +602,8 @@ document.addEventListener('alpine:init', () => {
       return match ? { name: match[1], confident: true } : { name: 'Linux', confident: false };
     },
 
-    choice(href, label, cta, meta, icon = 'fa-solid fa-download') {
-      return { href: this.pairedDownloadHref(href), label, cta, meta, icon };
+    choice(href, label, cta, meta, icon = 'fa-solid fa-download', options = {}) {
+      return { href: this.pairedDownloadHref(href), label, cta, meta, icon, disabled: !!options.disabled };
     },
 
     openLogin() {

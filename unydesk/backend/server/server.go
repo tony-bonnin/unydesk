@@ -588,6 +588,7 @@ func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serve
 	ldflagsParts := []string{
 		"-s",
 		"-w",
+		"-buildid=",
 		fmt.Sprintf("-X main.defaultServerURL=%s", strings.TrimSpace(serverURL)),
 		fmt.Sprintf("-X main.defaultInstallID=%s", strings.TrimSpace(installID)),
 	}
@@ -595,7 +596,7 @@ func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serve
 		ldflagsParts = append([]string{"-H=windowsgui"}, ldflagsParts...)
 	}
 	ldflags := strings.Join(ldflagsParts, " ")
-	args := []string{"build", "-trimpath"}
+	args := []string{"build", "-trimpath", "-buildvcs=false"}
 	if hostFFmpegEmbedAvailable(wd, spec.goos, spec.goarch) {
 		args = append(args, "-tags", "ffmpegembed")
 	}
@@ -612,7 +613,48 @@ func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serve
 		_ = os.Remove(outPath)
 		return "", fmt.Errorf("go build failed: %s", strings.TrimSpace(string(output)))
 	}
+	if err := compressPairedHostBinary(outPath, spec); err != nil {
+		slog.Debug("paired host UPX compression skipped", "path", outPath, "error", err)
+	}
 	return outPath, nil
+}
+
+func compressPairedHostBinary(path string, spec hostDownloadSpec) error {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("UNYDESK_DISABLE_UPX")), "1") {
+		return nil
+	}
+	if !pairedHostUPXSupported(spec) {
+		return nil
+	}
+	upxPath, err := exec.LookPath("upx")
+	if err != nil {
+		return err
+	}
+	flags := strings.Fields(strings.TrimSpace(os.Getenv("UNYDESK_UPX_FLAGS")))
+	if len(flags) == 0 {
+		flags = []string{"--best", "--lzma"}
+	}
+	if strings.TrimSpace(os.Getenv("UNYDESK_UPX_ULTRA")) == "1" {
+		flags = []string{"--ultra-brute", "--lzma"}
+	}
+	args := append(flags, path)
+	cmd := exec.Command(upxPath, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("upx failed: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func pairedHostUPXSupported(spec hostDownloadSpec) bool {
+	switch spec.goos {
+	case "linux":
+		return spec.goarch == "amd64" || spec.goarch == "arm64"
+	case "windows":
+		return spec.goarch == "amd64"
+	default:
+		return false
+	}
 }
 
 func hostFFmpegEmbedAvailable(root, goos, goarch string) bool {

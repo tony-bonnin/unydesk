@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>UnyDesk | SelfHosted Free Access</title>
-  <meta name="theme-color" content="#3e3aab">
+  <meta name="theme-color" content="#0800b1">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css?v=20260629-card-radius">
   <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
   <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
@@ -101,8 +104,8 @@
         </div>
 
         <div class="actions">
-          <button class="btn btn-primary" type="button" @click="openServiceStatus('info')">Open API Info</button>
-          <button class="btn btn-secondary" type="button" @click="openServiceStatus('health')">Health Check</button>
+          <button class="btn btn-primary" type="button" @click="openServiceStatus('info')"><i class="fa-solid fa-file-circle-check"></i> Open API Info</button>
+          <button class="btn btn-secondary" type="button" @click="openServiceStatus('health')"><i class="fa-solid fa-heart-circle-plus"></i> Health Check</button>
         </div>
       </div>
 
@@ -111,7 +114,7 @@
           <strong x-text="downloadTitle()"></strong>
           <p>Detected in your browser. If needed, open the full download list.</p>
           <div class="download-actions">
-            <a class="download-link" :href="downloadChoice.href" :aria-disabled="downloadChoice.href === '#' ? 'true' : 'false'">
+            <a class="download-link" :class="{ secondary: downloadChoice.disabled }" :href="downloadChoice.href" :aria-disabled="downloadChoice.disabled || downloadChoice.href === '#' ? 'true' : 'false'" @click="if (downloadChoice.disabled) $event.preventDefault()">
               <i :class="downloadChoice.icon || 'fa-solid fa-download'"></i>
               <span x-text="downloadChoice.cta"></span>
             </a>
@@ -177,9 +180,9 @@
                 <span x-text="item.description"></span>
               </div>
               <div class="download-actions">
-                <a class="download-link" :class="{ secondary: item.secondary }" :href="item.href">
+                <a class="download-link" :class="{ secondary: item.secondary || item.disabled }" :href="item.href" :aria-disabled="item.disabled ? 'true' : 'false'" @click="if (item.disabled) $event.preventDefault()">
                   <i :class="item.icon || 'fa-solid fa-download'"></i>
-                  <span>Download</span>
+                  <span x-text="item.cta || 'Download'"></span>
                 </a>
                 <a class="download-link secondary" x-show="item.archiveHref" :href="item.archiveHref">
                   <i class="fa-solid fa-file-zipper"></i>
