@@ -1,26 +1,51 @@
+import {
+  ANSWER_WATCHDOG_MAX_ATTEMPTS,
+  ANSWER_WATCHDOG_MS,
+  CODEC_PROMOTION_DELAY_MS,
+  CODEC_PROMOTION_MIN_DECODED_FRAMES,
+  CODEC_PROMOTION_RECHECK_MS,
+  ICE_OFFER_GATHER_TIMEOUT_MS,
+  REMOTE_CURSOR_ARROW,
+  RTC_STATS_INTERVAL_MS,
+  RTC_VIDEO_STALL_TIMEOUT_MS,
+  SCREEN_CHUNK_ASSEMBLY_TIMEOUT_MS,
+  SCREEN_CHUNK_HEADER_BYTES,
+  SCREEN_CHUNK_MAGIC,
+  SCREEN_CHUNK_MAX_ASSEMBLIES,
+  SCREEN_FALLBACK_MAX_ATTEMPTS,
+  SCREEN_FALLBACK_RETRY_MS,
+  SCREEN_WIRE_CODEC_PNG,
+  SCREEN_WIRE_CODEC_RGBA,
+  SCREEN_WIRE_CODEC_WEBP,
+  SCREEN_WIRE_HEADER_BYTES,
+  SCREEN_WIRE_KIND_KEYFRAME,
+  SCREEN_WIRE_KIND_PATCH,
+  SESSION_SOCKET_HIDDEN_RECONNECT_MS,
+  SESSION_SOCKET_RECONNECT_BASE_MS,
+  SESSION_SOCKET_RECONNECT_MAX_ATTEMPTS,
+  SESSION_SOCKET_RECONNECT_MAX_MS,
+  STALE_ANSWER_MAX_RECOVERIES,
+  STALE_ANSWER_RECOVERY_MS,
+  VIDEO_FRAME_LOG_INTERVAL_MS,
+  VIDEO_PLAYBACK_TIMEOUT_MS,
+  arrayBufferToBase64,
+  codecNameForMime,
+  codecPreferenceRank,
+  countSDPCandidates,
+  describeICECandidate,
+  describeIceServers,
+  describeVideoCodecsFromSDP,
+  elapsedMs,
+  formatBytes,
+  normalizeIceServers,
+  nowMs,
+  uniqueCodecNames,
+  videoCodecOrderFromSDP,
+  waitForICEGatheringComplete,
+} from "/js/control/shared.js";
+
 (async () => {
-  const CONTROL_DIAGNOSTIC_BUILD = "20260629-h264-first-stall-guard";
-  const SCREEN_WIRE_HEADER_BYTES = 36;
-  const SCREEN_WIRE_CODEC_WEBP = 2;
-  const SCREEN_WIRE_CODEC_PNG = 3;
-  const SCREEN_WIRE_CODEC_RGBA = 4;
-  const SCREEN_WIRE_KIND_KEYFRAME = 1;
-  const SCREEN_WIRE_KIND_PATCH = 2;
-  const SCREEN_CHUNK_MAGIC = "USDT";
-  const SCREEN_CHUNK_HEADER_BYTES = 20;
-  const SCREEN_CHUNK_MAX_ASSEMBLIES = 3;
-  const SCREEN_CHUNK_ASSEMBLY_TIMEOUT_MS = 350;
-  const SESSION_SOCKET_RECONNECT_BASE_MS = 1000;
-  const SESSION_SOCKET_RECONNECT_MAX_MS = 30000;
-  const SESSION_SOCKET_RECONNECT_MAX_ATTEMPTS = 8;
-  const SESSION_SOCKET_HIDDEN_RECONNECT_MS = 60000;
-  const VIDEO_PLAYBACK_TIMEOUT_MS = 1800;
-  const RTC_STATS_INTERVAL_MS = 1500;
-  const RTC_VIDEO_STALL_TIMEOUT_MS = 4500;
-  const VIDEO_FRAME_LOG_INTERVAL_MS = 2000;
-  const SCREEN_FALLBACK_RETRY_MS = 800;
-  const SCREEN_FALLBACK_MAX_ATTEMPTS = 5;
-  const REMOTE_CURSOR_ARROW = 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'20\' height=\'20\' viewBox=\'0 0 20 20\'%3E%3Cpath d=\'M3 2l10 10H8.6l2.5 5.1-1.8.9-2.5-5.1L4 15.6V2z\' fill=\'%23000000\'/%3E%3Cpath d=\'M3.6 3.3v10.85l2.83-2.81h.39l2.34 4.8.78-.39-2.34-4.8v-.54h3.54L3.6 3.3z\' fill=\'%23ffffff\' fill-opacity=\'.18\'/%3E%3C/svg%3E") 3 2, auto';
+  const CONTROL_DIAGNOSTIC_BUILD = "20260704-stable-h264";
 
   const state = {
     csrfToken: "",
@@ -34,9 +59,15 @@
     sessionSocketStopped: false,
     iceServers: [],
     runtimeFeatures: {},
+    configuredVideoCodecs: ["h264", "h265", "av1"],
     preferredVideoCodecs: ["h264", "h265", "av1"],
+    allowPremiumCodecPromotion: false,
     disabledRealtimeCodecs: new Set(),
     activeRealtimeCodecOrder: [],
+    codecPromotionTimer: null,
+    codecPromotionTarget: "",
+    codecPromotionAttempts: new Set(),
+    codecPromotionInProgress: false,
     realtimeRetrying: false,
     peerConnection: null,
     realtimeStarting: false,
@@ -47,6 +78,12 @@
     realtimeTrackReceivedAt: 0,
     currentOfferSDP: "",
     lastIgnoredAnswerKey: "",
+    staleAnswerRecoveryTimer: null,
+    staleAnswerRecoveries: 0,
+    transportRecoveryTimer: null,
+    transportRecoveryAttempts: 0,
+    answerWatchdogTimer: null,
+    answerWatchdogAttempts: 0,
     realtimeStatsTimer: null,
     realtimeLastStats: null,
     realtimeHostStatusSeen: false,
@@ -64,10 +101,12 @@
     localOfferPosted: false,
     remoteAnswerApplied: false,
     postedViewerCandidates: new Set(),
+    pendingViewerCandidates: [],
     appliedHostCandidates: new Set(),
     currentScreenObjectURL: "",
     screenVideoStream: null,
     screenVideoReady: false,
+    screenVideoReadyAt: 0,
     screenVideoPlaybackLogged: false,
     videoPlaybackTimer: null,
     screenFallbackRequested: false,
@@ -129,6 +168,8 @@
   const sessionOfferPreviewEl = document.getElementById("session-offer-preview");
   const sessionAnswerPreviewEl = document.getElementById("session-answer-preview");
   const sessionTransportLogEl = document.getElementById("session-transport-log");
+  const sessionLogToggleEl = document.getElementById("session-log-toggle");
+  const sessionLogBodyEl = document.getElementById("session-log-body");
   const sessionScreenMetaEl = document.getElementById("session-screen-meta");
   const sessionScreenVideoEl = document.getElementById("session-screen-video");
   const sessionScreenCanvasEl = document.getElementById("session-screen-canvas");
@@ -173,17 +214,16 @@
     const stamp = new Date().toLocaleTimeString();
     state.viewerTransportLog.push(`[${stamp}] ${message}`);
     state.viewerTransportLog = state.viewerTransportLog.slice(-200);
+    renderTransportLog();
+  }
+
+  function renderTransportLog() {
+    if (!sessionTransportLogEl) return;
+    const enabled = !sessionLogToggleEl || sessionLogToggleEl.checked;
+    if (sessionLogBodyEl) sessionLogBodyEl.classList.toggle("hidden", !enabled);
+    if (!enabled) return;
     sessionTransportLogEl.value = state.viewerTransportLog.join("\n");
     sessionTransportLogEl.scrollTop = sessionTransportLogEl.scrollHeight;
-  }
-
-  function nowMs() {
-    return window.performance && typeof window.performance.now === "function" ? window.performance.now() : Date.now();
-  }
-
-  function elapsedMs(startedAt) {
-    if (!startedAt) return 0;
-    return Math.max(0, Math.round(nowMs() - startedAt));
   }
 
   async function timedStep(label, fn) {
@@ -198,21 +238,34 @@
     }
   }
 
-  function formatBytes(value) {
-    const bytes = Number(value || 0);
-    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-  }
-
   function setClipboardStatus(message) {
     sessionClipboardStatusEl.textContent = message;
   }
 
   function setFileStatus(message) {
     sessionFileStatusEl.textContent = message;
+  }
+
+  async function postViewerCandidate(rawCandidate) {
+    await postSessionJSON(`/api/v1/sessions/${encodeURIComponent(state.sessionID)}/candidates`, {
+      candidate: rawCandidate,
+      source: "viewer",
+    });
+  }
+
+  async function flushPendingViewerCandidates(session) {
+    if (!state.localOfferPosted || state.pendingViewerCandidates.length === 0) return;
+    const queued = state.pendingViewerCandidates.slice();
+    state.pendingViewerCandidates = [];
+    appendTransportLog(`posting ${queued.length} buffered viewer ICE candidate${queued.length === 1 ? "" : "s"} after offer`);
+    for (const rawCandidate of queued) {
+      try {
+        await postViewerCandidate(rawCandidate);
+      } catch (error) {
+        appendTransportLog(`viewer ICE candidate post failed: ${error.message}`);
+      }
+    }
+    renderSessionDetails(session);
   }
 
   function cssCursorForRemoteKind(kind) {
@@ -267,16 +320,6 @@
     return `${Date.now().toString(16)}-${part()}-${part()}`;
   }
 
-  function arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let index = 0; index < bytes.length; index += 8192) {
-      const chunk = bytes.subarray(index, index + 8192);
-      binary += String.fromCharCode.apply(null, Array.from(chunk));
-    }
-    return window.btoa(binary);
-  }
-
   function sessionSocketURL() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(`${protocol}//${window.location.host}/api/v1/sessions/${encodeURIComponent(state.sessionID)}/ws`);
@@ -298,55 +341,6 @@
     return `/api/v1/browser/identity?${params.toString()}`;
   }
 
-  function normalizeIceServerURLs(urls) {
-    if (typeof urls === "string") {
-      const value = urls.trim();
-      return value ? [value] : [];
-    }
-    if (!Array.isArray(urls)) return [];
-    const seen = new Set();
-    const normalized = [];
-    urls.forEach((url) => {
-      const value = String(url || "").trim();
-      if (!value || seen.has(value)) return;
-      seen.add(value);
-      normalized.push(value);
-    });
-    return normalized;
-  }
-
-  function normalizeIceServers(servers) {
-    if (!Array.isArray(servers)) return [];
-    return servers.map((server) => {
-      const urls = normalizeIceServerURLs(server && server.urls);
-      if (urls.length === 0) return null;
-      const normalized = { urls };
-      const username = String((server && server.username) || "").trim();
-      const credential = String((server && server.credential) || "").trim();
-      const credentialType = String((server && (server.credentialType || server.credential_type)) || "").trim();
-      if (username) normalized.username = username;
-      if (credential) normalized.credential = credential;
-      if (credentialType) normalized.credentialType = credentialType;
-      return normalized;
-    }).filter(Boolean);
-  }
-
-  function describeIceServers(servers) {
-    if (!servers || servers.length === 0) {
-      return "ICE servers not configured; direct host candidates only";
-    }
-    let stunURLs = 0;
-    let turnURLs = 0;
-    servers.forEach((server) => {
-      normalizeIceServerURLs(server.urls).forEach((url) => {
-        const value = url.toLowerCase();
-        if (value.startsWith("turn:") || value.startsWith("turns:")) turnURLs += 1;
-        if (value.startsWith("stun:") || value.startsWith("stuns:")) stunURLs += 1;
-      });
-    });
-    return `ICE servers configured: ${servers.length} server(s), ${turnURLs} TURN URL(s), ${stunURLs} STUN URL(s)`;
-  }
-
   async function loadRuntimeInfo() {
     try {
       const response = await fetch("/api/v1/info", {
@@ -360,16 +354,28 @@
       const preferred = features.preferred_video_codecs || (data.webrtc && data.webrtc.preferred_video_codecs) || [];
       state.iceServers = normalizeIceServers(servers);
       state.runtimeFeatures = features;
-      state.preferredVideoCodecs = normalizePreferredVideoCodecs(preferred);
+      state.allowPremiumCodecPromotion = resolvePremiumCodecPromotionSetting(features);
+      state.configuredVideoCodecs = normalizePreferredVideoCodecs(preferred);
+      state.preferredVideoCodecs = instantVideoCodecOrder(state.configuredVideoCodecs);
       appendTransportLog(`diagnostic build: ${CONTROL_DIAGNOSTIC_BUILD}`);
       appendTransportLog(describeIceServers(state.iceServers));
       appendTransportLog(describeRuntimeFeatures());
     } catch (error) {
       state.iceServers = [];
       state.runtimeFeatures = {};
+      state.allowPremiumCodecPromotion = resolvePremiumCodecPromotionSetting({});
+      state.configuredVideoCodecs = ["h264", "h265", "av1"];
       state.preferredVideoCodecs = ["h264", "h265", "av1"];
       appendTransportLog(`ICE config unavailable: ${error.message}`);
     }
+  }
+
+  function resolvePremiumCodecPromotionSetting(features = {}) {
+    const params = new URLSearchParams(window.location.search || "");
+    const override = String(params.get("premium-codecs") || params.get("premium_codecs") || "").trim().toLowerCase();
+    if (override === "1" || override === "true" || override === "on") return true;
+    if (override === "0" || override === "false" || override === "off") return false;
+    return features && features.premium_codec_promotion === true;
   }
 
   function normalizePreferredVideoCodecs(codecs) {
@@ -387,6 +393,61 @@
     return normalized.length > 0 ? normalized : ["h264", "h265", "av1"];
   }
 
+  function orderedUniqueCodecs(values) {
+    const configured = new Set(state.configuredVideoCodecs || []);
+    const normalized = [];
+    const seen = new Set();
+    values.forEach((raw) => {
+      const codec = String(raw || "").trim().toLowerCase();
+      if (!codec || seen.has(codec)) return;
+      if (configured.size > 0 && !configured.has(codec)) return;
+      if (state.disabledRealtimeCodecs.has(codec)) return;
+      seen.add(codec);
+      normalized.push(codec);
+    });
+    return normalized;
+  }
+
+  function instantVideoCodecOrder(codecs = state.configuredVideoCodecs) {
+    const saved = state.configuredVideoCodecs;
+    if (Array.isArray(codecs) && codecs.length > 0) {
+      state.configuredVideoCodecs = codecs;
+    }
+    const order = orderedUniqueCodecs(["h264", "h265", "av1", ...(codecs || [])]);
+    state.configuredVideoCodecs = saved;
+    return order.length > 0 ? order : ["h264"];
+  }
+
+  function premiumVideoCodecCandidates() {
+    if (!state.allowPremiumCodecPromotion) return [];
+    return orderedUniqueCodecs(["av1", "h265"]).filter((codec) => {
+      if (state.codecPromotionAttempts.has(codec)) return false;
+      return browserSupportsVideoCodec(codec);
+    });
+  }
+
+  function nextPremiumVideoCodec() {
+    const candidates = premiumVideoCodecCandidates();
+    return candidates.length > 0 ? candidates[0] : "";
+  }
+
+  function currentVideoCodecPreference() {
+    const target = String(state.codecPromotionTarget || "").toLowerCase();
+    if (target && !state.disabledRealtimeCodecs.has(target)) {
+      const premium = orderedUniqueCodecs([target, "h264", "h265", "av1", ...(state.configuredVideoCodecs || [])]);
+      if (premium.length > 0) return premium;
+    }
+    return instantVideoCodecOrder();
+  }
+
+  function browserSupportsVideoCodec(codecName) {
+    if (!window.RTCRtpReceiver || typeof window.RTCRtpReceiver.getCapabilities !== "function") return true;
+    const capabilities = window.RTCRtpReceiver.getCapabilities("video");
+    const codecs = capabilities && Array.isArray(capabilities.codecs) ? capabilities.codecs : [];
+    if (codecs.length === 0) return true;
+    return codecs.some((codec) => codecNameForMime(codec.mimeType) === codecName);
+  }
+
   function describeRuntimeFeatures() {
     const features = state.runtimeFeatures || {};
     const enabled = [];
@@ -394,17 +455,11 @@
     if (features.av1) enabled.push("AV1");
     if (features.h264) enabled.push("H.264");
     if (features.quic) enabled.push("QUIC-reserved");
-    return `runtime features: ${enabled.length ? enabled.join(", ") : "default"} · codec preference: ${state.preferredVideoCodecs.join(" > ")}`;
-  }
-
-  function codecNameForMime(mimeType) {
-    const value = String(mimeType || "").toLowerCase();
-    if (value.includes("h265") || value.includes("hevc")) return "h265";
-    if (value.includes("av1")) return "av1";
-    if (value.includes("h264")) return "h264";
-    if (value.includes("vp9")) return "vp9";
-    if (value.includes("vp8")) return "vp8";
-    return "";
+    const premium = premiumVideoCodecCandidates();
+    const premiumText = state.allowPremiumCodecPromotion
+      ? (premium.length ? premium.join(" > ") : "none")
+      : "disabled";
+    return `runtime features: ${enabled.length ? enabled.join(", ") : "default"} · startup codec: ${state.preferredVideoCodecs.join(" > ")} · premium auto: ${premiumText}`;
   }
 
   function applyVideoCodecPreferences(transceiver) {
@@ -415,7 +470,9 @@
     if (codecs.length === 0) return;
     const preferred = [];
     const selected = new Set();
-    state.preferredVideoCodecs.forEach((codecName) => {
+    const preference = currentVideoCodecPreference();
+    state.preferredVideoCodecs = preference;
+    preference.forEach((codecName) => {
       if (state.disabledRealtimeCodecs.has(codecName)) return;
       const rankedCodecs = codecs
         .map((codec, index) => ({ codec, index }))
@@ -455,31 +512,6 @@
         appendTransportLog(`realtime playback hint applied: ${property}=0`);
       } catch (_error) {}
     });
-  }
-
-  function describeVideoCodecsFromSDP(sdp) {
-    const lines = String(sdp || "").split(/\r?\n/);
-    const payloads = new Set();
-    let inVideo = false;
-    lines.forEach((line) => {
-      if (line.startsWith("m=")) {
-        inVideo = line.startsWith("m=video");
-        if (inVideo) {
-          line.split(/\s+/).slice(3).forEach((payload) => payloads.add(payload));
-        }
-        return;
-      }
-      if (!inVideo) return;
-      const match = line.match(/^a=rtpmap:(\d+)\s+([^/]+)/i);
-      if (match && payloads.has(match[1])) {
-        payloads.add(`${match[1]}:${match[2].toUpperCase()}`);
-      }
-    });
-    return Array.from(payloads)
-      .map((value) => String(value))
-      .filter((value) => value.includes(":"))
-      .slice(0, 12)
-      .join(", ") || "none";
   }
 
   function startRealtimeStatsMonitor(peerConnection) {
@@ -557,6 +589,20 @@
     const jitterMs = Number(inbound.jitter || 0) * 1000;
     const codec = codecs.get(inbound.codecId);
     const codecText = codec ? `${String(codec.mimeType || "video").replace("video/", "").toUpperCase()} ${String(codec.sdpFmtpLine || "").slice(0, 80)}`.trim() : "codec=unknown";
+    const actualCodec = codec ? codecNameForMime(codec.mimeType) : "";
+    if (actualCodec && state.activeRealtimeCodecOrder[0] !== actualCodec) {
+      state.activeRealtimeCodecOrder = [actualCodec, ...state.activeRealtimeCodecOrder.filter((name) => name !== actualCodec)];
+    }
+    if (actualCodec && state.codecPromotionTarget && actualCodec !== state.codecPromotionTarget) {
+      appendTransportLog(`premium codec ${codecLabel(state.codecPromotionTarget)} was not selected; continuing with ${codecLabel(actualCodec)}`);
+      state.codecPromotionTarget = "";
+      state.codecPromotionInProgress = false;
+      if (actualCodec === "h264" && state.screenVideoReady) {
+        scheduleCodecPromotion("actual-codec-fallback");
+      }
+    } else if (actualCodec === "h264" && state.screenVideoReady) {
+      scheduleCodecPromotion("rtc-stats");
+    }
     const rttMs = selectedPair && Number.isFinite(Number(selectedPair.currentRoundTripTime)) ? Number(selectedPair.currentRoundTripTime) * 1000 : 0;
     const size = inbound.frameWidth && inbound.frameHeight ? `${inbound.frameWidth}x${inbound.frameHeight}` : "size=?";
     const freezes = Number(inbound.freezeCount || 0);
@@ -591,7 +637,7 @@
     state.realtimeVideoStallRecoveryStarted = true;
     const codec = state.activeRealtimeCodecOrder[0] || "";
     appendTransportLog(`realtime video stalled for ${Math.round(nowMs() - state.realtimeVideoStallStartedAt)}ms · ${codecText}`);
-    if (codec === "h265" && retryRealtimeWithoutCodec("h265", "H.265 stalled after first frames")) return;
+    if (isPremiumVideoCodec(codec) && retryRealtimeWithoutCodec(codec, `${codecLabel(codec)} stalled after first frames`)) return;
     resetScreenVideo();
     sessionScreenMetaEl.textContent = "Realtime video stalled; requesting peer frame fallback.";
     requestScreenFallback("realtime video stalled after first frames");
@@ -649,33 +695,6 @@
     state.videoFrameStats = null;
   }
 
-  function codecPreferenceRank(codecName, codec) {
-    if (codecName !== "h264") return 100;
-    const fmtp = String((codec && codec.sdpFmtpLine) || "").toLowerCase();
-    const packetizationScore = fmtp.includes("packetization-mode=1") ? 0 : 100;
-    const profileMatch = fmtp.match(/profile-level-id=([0-9a-f]+)/);
-    const profile = profileMatch ? profileMatch[1] : "";
-    const profileRank = {
-      "42e01f": 0,
-      "42001f": 10,
-      "4d001f": 20,
-      "64001f": 30,
-    };
-    return packetizationScore + (profileRank[profile] ?? 90);
-  }
-
-  function uniqueCodecNames(codecs) {
-    const names = [];
-    const seen = new Set();
-    codecs.forEach((codec) => {
-      const name = codecNameForMime(codec.mimeType).toUpperCase();
-      if (!name || seen.has(name)) return;
-      seen.add(name);
-      names.push(name);
-    });
-    return names;
-  }
-
   function standaloneTokenStorageKey() {
     return `unydesk.standalone.token.${state.sessionID || "pending"}`;
   }
@@ -707,7 +726,7 @@
     sessionDetailDeliveriesEl.textContent = String(session.dispatch_count || 0);
     sessionDetailHostAckEl.textContent = formatDateTime(session.last_host_ack_at);
     sessionOfferPreviewEl.value = "Viewer creates a WebRTC offer, host posts the answer, and ICE candidates trickle through the broker API.";
-    sessionAnswerPreviewEl.value = "Screen video uses WebRTC realtime codecs (H.265 preferred, H.264 stable fallback, AV1 optional) when available; input, clipboard, and file transfer use WebRTC data channels with broker fallback.";
+    sessionAnswerPreviewEl.value = "Screen video starts with stable H.264 WebRTC, then promotes to AV1/H.265 when the peer path proves it can stay low-latency; WebP frames are the final peer data-channel fallback.";
     sessionCloseBtn.disabled = session.status === "closed";
     renderScreenPreview(session);
   }
@@ -745,6 +764,45 @@
     state.videoPlaybackTimer = null;
   }
 
+  function hasUsablePeerChannel() {
+    return Boolean(
+      (state.inputChannel && state.inputChannel.readyState === "open") ||
+      (state.auxChannel && state.auxChannel.readyState === "open") ||
+      (state.screenChannel && state.screenChannel.readyState === "open")
+    );
+  }
+
+  function clearTransportRecoveryTimer() {
+    if (!state.transportRecoveryTimer) return;
+    window.clearTimeout(state.transportRecoveryTimer);
+    state.transportRecoveryTimer = null;
+  }
+
+  function scheduleTransportRecovery(reason) {
+    if (state.transportRecoveryTimer || state.realtimeRetrying || !state.peerConnection || !state.remoteAnswerApplied) return;
+    if (state.transportRecoveryAttempts >= 2) {
+      appendTransportLog(`transport recovery limit reached: ${reason}`);
+      return;
+    }
+    const codec = state.activeRealtimeCodecOrder[0] || "";
+    let recoveryDelayMs = 1200;
+    if (codec === "h264") {
+      recoveryDelayMs = 4500;
+    } else if (codec === "h265") {
+      recoveryDelayMs = 2200;
+    }
+    state.transportRecoveryTimer = window.setTimeout(() => {
+      state.transportRecoveryTimer = null;
+      if (isScreenVideoActive() || hasUsablePeerChannel() || !state.peerConnection || state.realtimeRetrying) return;
+      state.transportRecoveryAttempts += 1;
+      appendTransportLog(`transport recovery ${state.transportRecoveryAttempts}/2: restarting WebRTC after ${reason}`);
+      closeRealtimeSession({ preserveDisabledCodecs: true, preserveCodecPromotion: true });
+      void fetchSession()
+        .then((session) => ensureRealtimeSession(session))
+        .catch((error) => appendTransportLog(`transport recovery failed: ${error.message}`));
+    }, recoveryDelayMs);
+  }
+
   function requestScreenFallback(reason, attempt = 0) {
     if (!state.sessionID) return;
     if (attempt === 0) {
@@ -758,13 +816,14 @@
       type: "screen_fallback_request",
       session_id: state.sessionID,
       reason,
-    }, { channel: "aux", log: false, silent: true, peerOnly: true });
+    }, { channel: "aux", log: false, silent: true });
     if (sent) {
       appendTransportLog("peer frame fallback requested");
       return;
     }
     if (attempt + 1 >= SCREEN_FALLBACK_MAX_ATTEMPTS) {
       appendTransportLog("peer frame fallback request could not be delivered yet");
+      scheduleTransportRecovery("peer frame fallback request stayed undeliverable");
       return;
     }
     window.setTimeout(() => requestScreenFallback(reason, attempt + 1), SCREEN_FALLBACK_RETRY_MS);
@@ -788,10 +847,14 @@
       } else {
         appendTransportLog("decode timeout stats: no inbound RTP stats yet");
       }
-      if (retryRealtimeWithoutCodec("h265", "H.265 decode timeout")) return;
-      resetScreenVideo();
-      sessionScreenMetaEl.textContent = "Realtime video decode timeout; requesting peer frame fallback.";
+      const codec = state.activeRealtimeCodecOrder[0] || "";
+      if (isPremiumVideoCodec(codec) && retryRealtimeWithoutCodec(codec, `${codecLabel(codec)} decode timeout`)) return;
+      sessionScreenMetaEl.textContent = "Realtime video is still warming up; peer frame fallback is active until decoded frames arrive.";
+      appendTransportLog("keeping realtime video track attached while peer frame fallback is active");
       requestScreenFallback("realtime video playback timeout");
+      if (!hasUsablePeerChannel()) {
+        scheduleTransportRecovery("realtime video timeout with no usable peer channels");
+      }
     }, realtimePlaybackTimeoutMs());
   }
 
@@ -800,6 +863,19 @@
     if (codec === "h265") return 1400;
     if (codec === "h264") return VIDEO_PLAYBACK_TIMEOUT_MS;
     return 2200;
+  }
+
+  function isPremiumVideoCodec(codecName) {
+    const codec = String(codecName || "").toLowerCase();
+    return codec === "av1" || codec === "h265";
+  }
+
+  function codecLabel(codecName) {
+    const codec = String(codecName || "").toLowerCase();
+    if (codec === "h265") return "H.265";
+    if (codec === "av1") return "AV1";
+    if (codec === "h264") return "H.264";
+    return "Realtime video";
   }
 
   function shouldRetryRealtimeWithoutCodec(codecName) {
@@ -814,9 +890,15 @@
     if (!shouldRetryRealtimeWithoutCodec(codec) || state.realtimeRetrying || !state.sessionID) return false;
     state.realtimeRetrying = true;
     state.disabledRealtimeCodecs.add(codec);
-    appendTransportLog(`${reason}; retrying realtime video without ${codec.toUpperCase()}`);
+    if (state.codecPromotionTarget === codec) {
+      state.codecPromotionTarget = nextPremiumVideoCodec();
+    }
+    if (!state.codecPromotionTarget) {
+      state.codecPromotionInProgress = false;
+    }
+    appendTransportLog(`${reason}; retrying realtime video without ${codecLabel(codec)}`);
     sessionScreenMetaEl.textContent = `${reason}; retrying realtime video with fallback codec.`;
-    closeRealtimeSession({ preserveDisabledCodecs: true });
+    closeRealtimeSession({ preserveDisabledCodecs: true, preserveCodecPromotion: true });
     window.setTimeout(() => {
       void fetchSession()
         .then((session) => ensureRealtimeSession(session))
@@ -831,13 +913,76 @@
     return true;
   }
 
+  function clearCodecPromotionTimer() {
+    if (!state.codecPromotionTimer) return;
+    window.clearTimeout(state.codecPromotionTimer);
+    state.codecPromotionTimer = null;
+  }
+
+  function scheduleCodecPromotion(trigger = "video-ready") {
+    if (state.codecPromotionTimer || state.codecPromotionInProgress || state.screenFallbackRequested) return;
+    if ((state.activeRealtimeCodecOrder[0] || "") !== "h264") return;
+    const target = nextPremiumVideoCodec();
+    if (!target) return;
+    appendTransportLog(`premium codec promotion armed: ${codecLabel(target)} after stable H.264 (${trigger})`);
+    state.codecPromotionTimer = window.setTimeout(() => {
+      state.codecPromotionTimer = null;
+      maybePromoteRealtimeCodec(trigger);
+    }, CODEC_PROMOTION_DELAY_MS);
+  }
+
+  function maybePromoteRealtimeCodec(trigger = "video-ready") {
+    if (state.codecPromotionInProgress || state.realtimeRetrying || !state.sessionID) return;
+    if (!state.screenVideoReady || state.screenFallbackRequested || !state.peerConnection) return;
+    if ((state.activeRealtimeCodecOrder[0] || "") !== "h264") return;
+    const target = nextPremiumVideoCodec();
+    if (!target) return;
+    const inbound = state.realtimeLastStats && state.realtimeLastStats.inbound;
+    const decodedFrames = Number(inbound && inbound.framesDecoded || 0);
+    const readyForMs = elapsedMs(state.screenVideoReadyAt);
+    if (decodedFrames < CODEC_PROMOTION_MIN_DECODED_FRAMES) {
+      appendTransportLog(`premium codec promotion waiting: H.264 only decoded ${decodedFrames}/${CODEC_PROMOTION_MIN_DECODED_FRAMES} frames`);
+      state.codecPromotionTimer = window.setTimeout(() => {
+        state.codecPromotionTimer = null;
+        maybePromoteRealtimeCodec(trigger);
+      }, CODEC_PROMOTION_RECHECK_MS);
+      return;
+    }
+    state.codecPromotionAttempts.add(target);
+    state.codecPromotionTarget = target;
+    state.codecPromotionInProgress = true;
+    appendTransportLog(`premium codec promotion: trying ${codecLabel(target)} after ${readyForMs}ms stable H.264 · media remains peer-to-peer`);
+    sessionScreenMetaEl.textContent = `Trying premium realtime video with ${codecLabel(target)}.`;
+    closeRealtimeSession({ preserveDisabledCodecs: true, preserveCodecPromotion: true });
+    window.setTimeout(() => {
+      void fetchSession()
+        .then((session) => ensureRealtimeSession(session))
+        .catch((error) => {
+          state.codecPromotionInProgress = false;
+          appendTransportLog(`premium codec promotion failed: ${error.message}`);
+          requestScreenFallback("premium codec promotion failed");
+        });
+    }, 250);
+  }
+
   function showScreenVideo(prefix = "Realtime video") {
     if (!sessionScreenVideoEl || !sessionScreenVideoEl.srcObject) return;
     clearVideoPlaybackWatchdog();
+    clearTransportRecoveryTimer();
+    state.transportRecoveryAttempts = 0;
     state.screenVideoReady = true;
     if (!state.screenVideoPlaybackLogged) {
       state.screenVideoPlaybackLogged = true;
       appendTransportLog(`realtime video playing after offer=${elapsedMs(state.realtimeOfferPostedAt)}ms answer=${elapsedMs(state.realtimeAnswerAppliedAt)}ms track=${elapsedMs(state.realtimeTrackReceivedAt)}ms`);
+    }
+    if (!state.screenVideoReadyAt) {
+      state.screenVideoReadyAt = nowMs();
+    }
+    if (isPremiumVideoCodec(state.activeRealtimeCodecOrder[0])) {
+      state.codecPromotionInProgress = false;
+      appendTransportLog(`premium codec active: ${codecLabel(state.activeRealtimeCodecOrder[0])}`);
+    } else {
+      scheduleCodecPromotion("decoded-frame");
     }
     sessionScreenVideoEl.classList.remove("hidden");
     sessionScreenCanvasEl.classList.add("hidden");
@@ -850,6 +995,7 @@
     stopVideoFrameProbe();
     clearVideoPlaybackWatchdog();
     state.screenVideoReady = false;
+    state.screenVideoReadyAt = 0;
     state.screenVideoPlaybackLogged = false;
     state.screenVideoStream = null;
     if (!sessionScreenVideoEl) return;
@@ -1072,6 +1218,7 @@
     state.realtimeOfferPostedAt = 0;
     state.realtimeAnswerAppliedAt = 0;
     state.realtimeTrackReceivedAt = 0;
+    state.answerWatchdogAttempts = 0;
     const peerConfig = { iceServers: state.iceServers };
     if (state.iceServers.length > 0) {
       peerConfig.iceCandidatePoolSize = 2;
@@ -1116,10 +1263,12 @@
       const raw = JSON.stringify(event.candidate.toJSON());
       if (state.postedViewerCandidates.has(raw)) return;
       state.postedViewerCandidates.add(raw);
-      void postSessionJSON(`/api/v1/sessions/${encodeURIComponent(state.sessionID)}/candidates`, {
-        candidate: raw,
-        source: "viewer",
-      }).then(() => {
+      if (!state.localOfferPosted) {
+        state.pendingViewerCandidates.push(raw);
+        renderSessionDetails(session);
+        return;
+      }
+      void postViewerCandidate(raw).then(() => {
         renderSessionDetails(session);
       }).catch((error) => {
         appendTransportLog(`viewer ICE candidate post failed: ${error.message}`);
@@ -1171,6 +1320,8 @@
       channel.addEventListener("open", () => {
         const mode = channel.ordered ? "reliable ordered" : "realtime unordered";
         appendTransportLog(`screen data channel open (${mode})`);
+        clearTransportRecoveryTimer();
+        state.transportRecoveryAttempts = 0;
         sessionScreenMetaEl.textContent = "Peer screen channel connected.";
         renderSessionDetails(session);
       });
@@ -1202,6 +1353,8 @@
     for (const [label, channel] of [["input", inputChannel], ["aux", auxChannel]]) {
       channel.addEventListener("open", () => {
         appendTransportLog(`${label} data channel open`);
+        clearTransportRecoveryTimer();
+        state.transportRecoveryAttempts = 0;
         renderSessionDetails(session);
       });
       channel.addEventListener("close", () => {
@@ -1222,6 +1375,8 @@
       state.realtimeOfferCreatedAt = nowMs();
       appendTransportLog(`local offer video codecs: ${describeVideoCodecsFromSDP(offer.sdp)}`);
       await timedStep("set local WebRTC offer", () => peerConnection.setLocalDescription(offer));
+      const iceGatherResult = await waitForICEGatheringComplete(peerConnection);
+      appendTransportLog(`posting WebRTC offer after viewer ICE gathering ${iceGatherResult}`);
       state.currentOfferSDP = JSON.stringify(peerConnection.localDescription);
       await timedStep("post WebRTC offer", () => postSessionJSON(`/api/v1/sessions/${encodeURIComponent(state.sessionID)}/offer`, {
         sdp: state.currentOfferSDP,
@@ -1234,6 +1389,8 @@
     state.localOfferPosted = true;
     state.realtimeOfferPostedAt = nowMs();
     appendTransportLog(`posted WebRTC offer after ${elapsedMs(state.realtimeStartedAt)}ms`);
+    await flushPendingViewerCandidates(session);
+    scheduleAnswerWatchdog("offer-posted");
     renderSessionDetails(session);
     state.realtimeStarting = false;
   }
@@ -1248,12 +1405,21 @@
           state.lastIgnoredAnswerKey = key;
           appendTransportLog("ignored stale remote answer: offer revision mismatch");
         }
+        scheduleStaleAnswerRecovery();
         return;
       }
+      clearStaleAnswerRecoveryTimer();
       const answer = JSON.parse(session.answer_sdp);
       appendTransportLog(`remote answer video codecs: ${describeVideoCodecsFromSDP(answer.sdp)}`);
+      const negotiatedOrder = videoCodecOrderFromSDP(answer.sdp).filter((codec) => !state.disabledRealtimeCodecs.has(codec));
+      if (negotiatedOrder.length > 0) {
+        state.activeRealtimeCodecOrder = negotiatedOrder;
+        appendTransportLog(`negotiated realtime codec order: ${negotiatedOrder.map(codecLabel).join(" > ")}`);
+      }
       await timedStep("set remote WebRTC answer", () => pc.setRemoteDescription(answer));
       state.remoteAnswerApplied = true;
+      state.staleAnswerRecoveries = 0;
+      clearAnswerWatchdogTimer();
       state.realtimeAnswerAppliedAt = nowMs();
       appendTransportLog(`applied remote answer (${countSDPCandidates(answer.sdp)} candidates) after offer=${elapsedMs(state.realtimeOfferPostedAt)}ms`);
       window.setTimeout(() => {
@@ -1283,7 +1449,95 @@
     return String(session.offer_sdp || "") === state.currentOfferSDP;
   }
 
+  function clearAnswerWatchdogTimer() {
+    if (!state.answerWatchdogTimer) return;
+    window.clearTimeout(state.answerWatchdogTimer);
+    state.answerWatchdogTimer = null;
+  }
+
+  function describeSessionRoute(session) {
+    if (!session) return "unknown";
+    return session.routed_hostname || session.routed_host_public_id || session.routed_host_id || "unresolved";
+  }
+
+  function describeSessionTime(value) {
+    if (!value) return "never";
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) return String(value);
+    const age = Math.max(0, Math.round((Date.now() - parsed) / 1000));
+    return `${age}s ago`;
+  }
+
+  function scheduleAnswerWatchdog(reason = "") {
+    if (state.remoteAnswerApplied || state.answerWatchdogTimer || !state.localOfferPosted) return;
+    if (state.answerWatchdogAttempts >= ANSWER_WATCHDOG_MAX_ATTEMPTS) return;
+    state.answerWatchdogTimer = window.setTimeout(async () => {
+      state.answerWatchdogTimer = null;
+      if (state.remoteAnswerApplied || !state.peerConnection || !state.localOfferPosted) return;
+      state.answerWatchdogAttempts += 1;
+      try {
+        const latestSession = await fetchSession();
+        if (latestSession.answer_sdp) {
+          await applyRemoteSignaling(latestSession);
+          return;
+        }
+        appendTransportLog(
+          `no remote answer yet (${state.answerWatchdogAttempts}/${ANSWER_WATCHDOG_MAX_ATTEMPTS})` +
+          ` · status=${latestSession.status || "unknown"}` +
+          ` · dispatch=${latestSession.dispatch_state || "none"}` +
+          ` · route=${describeSessionRoute(latestSession)}` +
+          ` · last_dispatch=${describeSessionTime(latestSession.last_dispatch_at)}` +
+          ` · last_host_ack=${describeSessionTime(latestSession.last_host_ack_at)}` +
+          (reason ? ` · trigger=${reason}` : "")
+        );
+        if (!latestSession.routed_host_id) {
+          setSessionFeedback("error", "No online host is routed for this session. Check the target host ID/name and host access state.");
+          return;
+        }
+        scheduleAnswerWatchdog("waiting-answer");
+      } catch (error) {
+        appendTransportLog(`answer watchdog failed: ${error.message}`);
+        scheduleAnswerWatchdog("watchdog-retry");
+      }
+    }, ANSWER_WATCHDOG_MS);
+  }
+
+  function clearStaleAnswerRecoveryTimer() {
+    if (!state.staleAnswerRecoveryTimer) return;
+    window.clearTimeout(state.staleAnswerRecoveryTimer);
+    state.staleAnswerRecoveryTimer = null;
+  }
+
+  function scheduleStaleAnswerRecovery() {
+    if (state.remoteAnswerApplied || state.staleAnswerRecoveryTimer) return;
+    if (state.staleAnswerRecoveries >= STALE_ANSWER_MAX_RECOVERIES) {
+      appendTransportLog("stale answer recovery limit reached; refresh the session if signaling stays pending");
+      return;
+    }
+    state.staleAnswerRecoveryTimer = window.setTimeout(async () => {
+      state.staleAnswerRecoveryTimer = null;
+      if (state.remoteAnswerApplied || !state.peerConnection || !state.localOfferPosted) return;
+      try {
+        const latestSession = await fetchSession();
+        if (latestSession.answer_sdp && remoteAnswerMatchesCurrentOffer(latestSession)) {
+          await applyRemoteSignaling(latestSession);
+          return;
+        }
+        state.staleAnswerRecoveries += 1;
+        appendTransportLog(`stale answer recovery ${state.staleAnswerRecoveries}/${STALE_ANSWER_MAX_RECOVERIES}: restarting WebRTC offer`);
+        closeRealtimeSession({ preserveDisabledCodecs: true });
+        await handleSessionUpdate(latestSession, false);
+      } catch (error) {
+        appendTransportLog(`stale answer recovery failed: ${error.message}`);
+      }
+    }, STALE_ANSWER_RECOVERY_MS);
+  }
+
   function closeRealtimeSession(options = {}) {
+    clearStaleAnswerRecoveryTimer();
+    clearAnswerWatchdogTimer();
+    clearCodecPromotionTimer();
+    clearTransportRecoveryTimer();
     if (state.peerConnection) {
       try {
         state.peerConnection.close();
@@ -1300,8 +1554,11 @@
     state.realtimeAnswerAppliedAt = 0;
     state.realtimeTrackReceivedAt = 0;
     state.realtimeTrackUnavailable = false;
+    state.screenVideoReadyAt = 0;
     state.currentOfferSDP = "";
     state.lastIgnoredAnswerKey = "";
+    state.answerWatchdogAttempts = 0;
+    state.transportRecoveryAttempts = 0;
     state.realtimeHostStatusSeen = false;
     state.peerConnectionState = "closed";
     state.inputChannel = null;
@@ -1311,11 +1568,17 @@
     state.remoteAnswerApplied = false;
     state.activeRealtimeCodecOrder = [];
     state.postedViewerCandidates = new Set();
+    state.pendingViewerCandidates = [];
     state.appliedHostCandidates = new Set();
     state.screenFallbackRequested = false;
     state.screenFallbackAttempts = 0;
     if (!options.preserveDisabledCodecs) {
       state.disabledRealtimeCodecs = new Set();
+    }
+    if (!options.preserveCodecPromotion) {
+      state.codecPromotionTarget = "";
+      state.codecPromotionAttempts = new Set();
+      state.codecPromotionInProgress = false;
     }
     clearVideoPlaybackWatchdog();
     resetScreenVideo();
@@ -1344,7 +1607,10 @@
       case "screen_error":
         state.lastScreenError = String(eventPayload.error || "");
         appendTransportLog(`screen error: ${state.lastScreenError}`);
-        if (/h\.?264|av1|video|encoder|decode/i.test(state.lastScreenError)) {
+        if (/h\.?265|hevc|av1|video|encoder|decode/i.test(state.lastScreenError) && isPremiumVideoCodec(state.activeRealtimeCodecOrder[0])) {
+          if (retryRealtimeWithoutCodec(state.activeRealtimeCodecOrder[0], state.lastScreenError)) return;
+        }
+        if (/h\.?264|h\.?265|hevc|av1|video|encoder|decode/i.test(state.lastScreenError)) {
           resetScreenVideo();
         }
         sessionScreenMetaEl.textContent = `Peer screen channel · ${state.lastScreenError}`;
@@ -1395,9 +1661,12 @@
         const trackPresent = typeof eventPayload.track_present === "boolean" ? eventPayload.track_present : null;
         const streamPresent = typeof eventPayload.stream_present === "boolean" ? eventPayload.stream_present : null;
         const action = String(eventPayload.action || "profile");
-        if (["host-rtp", "rtp-starting", "rtp-start-blocked", "track-unavailable", "fallback"].includes(action)) {
+        if (["host-rtp", "rtp-starting", "rtp-start-blocked", "track-unavailable", "fallback", "encoder-started", "first-raw-frame", "first-frame"].includes(action)) {
           state.realtimeHostStatusSeen = true;
           clearHostStatusWatchdog();
+        }
+        if ((action === "encoder-started" || action === "first-raw-frame") && !state.screenVideoReady) {
+          scheduleVideoPlaybackWatchdog();
         }
         if (action === "track-unavailable") {
           state.realtimeTrackUnavailable = true;
@@ -1810,17 +2079,6 @@
     return true;
   }
 
-  function countSDPCandidates(sdp) {
-    return String(sdp || "").split(/\r?\n/).filter((line) => line.startsWith("a=candidate:")).length;
-  }
-
-  function describeICECandidate(candidate) {
-    const raw = String((candidate && candidate.candidate) || "");
-    const type = raw.match(/\btyp\s+(\S+)/i);
-    const protocol = raw.match(/\s(udp|tcp)\s/i);
-    return `${type ? type[1] : "unknown"} ${protocol ? protocol[1].toLowerCase() : ""}`.trim();
-  }
-
   function queuePointerMove(x, y) {
     state.pendingPointerMove = { x, y };
     if (state.pointerMoveFrameRequested) return;
@@ -2064,6 +2322,19 @@
     if (data.token) window.localStorage.setItem("unydesk.browser.token", data.token);
   }
 
+  async function ensureDashboardAuthentication() {
+    if (state.standaloneMode) return true;
+    const response = await fetch("/api/v1/auth/session", {
+      headers: sessionRequestHeaders(),
+    });
+    captureCSRF(response);
+    if (!response.ok) throw new Error("dashboard auth check failed");
+    const data = await response.json();
+    if (data && data.authenticated) return true;
+    window.location.assign("/");
+    return false;
+  }
+
   function readSessionID() {
     const url = new URL(window.location.href);
     return String(url.searchParams.get("session") || "").trim();
@@ -2097,6 +2368,7 @@
   sessionFileInputEl.addEventListener("change", updateSelectedFileMeta);
   sessionFileSendBtn.addEventListener("click", () => void sendSelectedFileToHost());
   sessionFileCancelBtn.addEventListener("click", cancelSelectedFileTransfer);
+  if (sessionLogToggleEl) sessionLogToggleEl.addEventListener("change", renderTransportLog);
   sessionRefreshBtn.addEventListener("click", async () => {
     try {
       await handleSessionUpdate(await fetchSession(), true);
@@ -2130,7 +2402,8 @@
   sessionScreenVideoEl.addEventListener("playing", () => showScreenVideo("Realtime video"));
   sessionScreenVideoEl.addEventListener("error", () => {
     appendTransportLog("realtime video element reported a decode/playback error");
-    if (retryRealtimeWithoutCodec("h265", "H.265 video element error")) return;
+    const codec = state.activeRealtimeCodecOrder[0] || "";
+    if (isPremiumVideoCodec(codec) && retryRealtimeWithoutCodec(codec, `${codecLabel(codec)} video element error`)) return;
     resetScreenVideo();
     requestScreenFallback("realtime video element error");
   });
@@ -2157,6 +2430,8 @@
     updateSelectedFileMeta();
     setClipboardStatus("Clipboard sync is ready when the WebRTC aux channel is connected.");
     setFileStatus("Files are delivered to the host Downloads folder when the WebRTC aux channel is connected.");
+    const authenticated = await ensureDashboardAuthentication();
+    if (!authenticated) return;
     await loadRuntimeInfo();
     await ensureBrowserIdentity();
     try {

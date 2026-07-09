@@ -14,6 +14,14 @@
   --radius-sm: 4px;
 }
 
+@font-face {
+    font-family: "Archivo Black";
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/vendor/fonts/archivo-black-latin.woff2") format("woff2");
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -73,6 +81,97 @@ button.btn.btn-secondary i {
     gap: 10px;
 }
 
+.language-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    opacity: 0.8;
+}
+
+.language-switcher button {
+    display: flex;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font: inherit;
+    min-width: 2rem;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1;
+    flex-direction: row;
+    align-items: center;
+    padding: 0;
+    justify-content: center;
+    width: 0;
+    height: 0;
+    border-radius: 999px;
+}
+
+.language-switcher button.is-active {
+    filter: grayscale(0.33);
+    opacity: 0.33;
+}
+
+.locale-flag {
+    display: block;
+    width: 1rem;
+    box-shadow: 0 0 0 1px rgba(12, 16, 44, 0.08);
+    object-fit: cover;
+    border-radius: 999px;
+    height: 0.95rem;
+}
+
+.locale-flag:hover {
+    opacity: 0.33;
+}
+
+.language-switcher button:hover,
+.language-switcher button.is-active {
+    background: linear-gradient(180deg, #f4f4ff, #eceeff);
+    color: #fff;
+    border-radius: 2px;
+}
+
+.password-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+.password-input-wrap .auth-input {
+    padding-right: 3rem;
+}
+
+.password-toggle-btn {
+    position: absolute;
+    top: 50%;
+    right: 0.6rem;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: rgba(25, 26, 46, 0.45);
+    cursor: pointer;
+    z-index: 1;
+}
+
+.password-toggle-btn:hover,
+.password-toggle-btn:focus-visible {
+    color: var(--brand-2);
+    outline: none;
+}
+
+.password-toggle-btn i {
+    opacity: 1;
+}
 .brand {
   display: flex;
   align-items: center;
@@ -133,14 +232,16 @@ button.btn.btn-secondary i {
 .account-btn i:first-child {
     color: var(--brand-2);
     opacity: 0.15;
-    font-size: 1.33rem;
+    font-size: 1rem;
+    position: relative;
+    top: -0.1rem;
 }
 
 .hero {
-  display: grid;
-  grid-template-columns: 1.15fr 0.85fr;
-  gap: 22px;
-  padding: 24px;
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 22px;
+    padding: 24px;
 }
 
 .eyebrow {
@@ -753,7 +854,15 @@ i.bi.bi-key-fill {
   padding: 14px;
   display: flex;
   flex-direction: column;
-  min-height: 204px;
+}
+
+.overview-host-card.is-unavailable {
+  background: rgba(255, 255, 255, 0.66);
+  border-style: dashed;
+}
+
+.overview-host-card.is-unavailable .overview-host-os {
+  color: var(--muted);
 }
 
 .overview-host-card-head {
@@ -806,6 +915,13 @@ i.bi.bi-key-fill {
   gap: 8px;
 }
 
+.dashboard-helper {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .account-userline strong {
   margin-bottom: 2px;
 }
@@ -819,14 +935,13 @@ i.bi.bi-key-fill {
 }
 
 .global-feedback {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 16px;
-  border-radius: var(--radius-md);
-  border: 1px solid transparent;
-  font-size: 0.9rem;
-  font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    font-size: 0.9rem;
+    font-weight: 600;
 }
 
 .global-feedback.is-success {
@@ -1713,6 +1828,81 @@ i.bi.bi-key-fill {
   width: min(980px, 100%);
 }
 
+.approval-wait-modal {
+  width: min(540px, 100%);
+  min-height: auto;
+  max-height: none;
+}
+
+.approval-wait-head {
+  padding: 1.5rem 1.5rem 1.1rem;
+}
+
+.approval-wait-head h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.approval-wait-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.approval-wait-body {
+  max-width: none;
+  width: 100%;
+  padding: 1.5rem;
+  margin: 0;
+}
+
+.approval-wait-card {
+  display: grid;
+  gap: 1rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem;
+  box-shadow: rgba(62, 58, 171, 0.06) 0 14px 28px;
+}
+
+.approval-wait-hero {
+  display: grid;
+  gap: 0.9rem;
+  justify-items: start;
+}
+
+.approval-wait-spinner {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 3px solid rgba(62, 58, 171, 0.16);
+  border-top-color: var(--brand);
+  animation: standalone-spin 1s linear infinite;
+}
+
+.approval-wait-message {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.approval-wait-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.approval-wait-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+}
+
 .session-modal-body {
   max-width: none;
   width: 100%;
@@ -1724,6 +1914,43 @@ i.bi.bi-key-fill {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+}
+
+.session-diagnostics-card {
+  grid-column: 1 / -1;
+}
+
+.session-log-head {
+  align-items: center;
+}
+
+.session-log-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: max-content;
+  color: var(--brand);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.session-log-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+}
+
+.session-log-toggle span {
+  color: var(--brand);
+  font-size: 0.82rem;
+}
+
+.session-log-body {
+  grid-template-columns: 1fr;
+}
+
+.session-log-body .auth-label {
+  width: 100%;
 }
 
 .session-modal-actions {
@@ -1847,7 +2074,7 @@ body.account-control-expanded .account-control-workspace {
 body.account-control-expanded .account-workspace-topbar,
 body.account-control-expanded .account-panel-copy,
 body.account-control-expanded .message-container,
-body.account-control-expanded .session-control-grid > .settings-card:last-child,
+body.account-control-expanded .session-control-grid > .settings-card:not(:first-child),
 body.account-control-expanded .session-control-grid > .settings-card:first-child > .dashboard-head,
 body.account-control-expanded .session-control-grid > .settings-card:first-child > .dashboard-grid,
 body.account-control-expanded .session-control-grid > .settings-card:first-child > .session-modal-actions,
@@ -1989,6 +2216,18 @@ body.account-control-expanded .session-screen-image {
   max-width: 110px;
 }
 
+.bootstrap-package-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.bootstrap-package-grid .btn {
+  justify-content: center;
+  min-height: 48px;
+}
+
 .downloads {
   display: grid;
   gap: 12px;
@@ -1996,7 +2235,8 @@ body.account-control-expanded .session-screen-image {
 
 @media (max-width: 1040px) {
   .session-control-grid,
-  .session-control-utilities {
+  .session-control-utilities,
+  .approval-wait-meta {
     grid-template-columns: 1fr;
   }
 }
@@ -2117,7 +2357,9 @@ aside code {
 
   .shell {
     padding: 1rem;
-  border-radius: var(--radius-md);
+    height: auto;
+    min-height: 100vh;
+    border-radius: var(--radius-md);
   }
 
   .topbar {
@@ -2130,6 +2372,7 @@ aside code {
     width: 100%;
     justify-content: space-between;
     flex-wrap: wrap;
+    min-width: 0;
   }
 
   .brand {
@@ -2148,6 +2391,11 @@ aside code {
     grid-template-columns: 1fr;
   }
 
+  .hero {
+    height: auto;
+    min-height: 0;
+  }
+
   .account-dashboard,
   .dashboard-grid-compact,
   .session-control-grid,
@@ -2156,6 +2404,10 @@ aside code {
   }
 
   .overview-hosts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bootstrap-package-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2194,6 +2446,11 @@ aside code {
 
   .hero {
     padding: 16px;
+  }
+
+  .download-reco {
+    height: auto;
+    min-height: 0;
   }
 
   .identity-row {
@@ -2306,7 +2563,7 @@ aside code {
 
   .topbar {
       justify-content: center;
-      gap: 2rem;
+      gap: 1rem;
       align-items: stretch;
       padding: 18px 16px 14px;
       border-bottom: 0;
@@ -2320,6 +2577,7 @@ aside code {
 
   .brand-mark {
     width: 100%;
+    min-width: 0;
   }
 
   .brand-mark img {
@@ -2334,6 +2592,21 @@ aside code {
     grid-template-columns: 1fr;
     width: 100%;
     gap: 8px;
+    min-width: 0;
+  }
+
+  .topbar-actions .language-switcher,
+  .account-topbar-right .language-switcher {
+    justify-content: center;
+  }
+
+  .language-switcher {
+    width: 100%;
+  }
+
+  .language-switcher button {
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .account-btn {
@@ -2372,6 +2645,11 @@ aside code {
     gap: 10px;
   }
 
+  .account-topbar-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
   .topbar-badge {
     display:none;
   }
@@ -2380,6 +2658,8 @@ aside code {
     gap: 16px;
     padding: 20px 16px 18px;
     overflow: hidden;
+    height: auto;
+    min-height: 0;
   }
 
   .eyebrow {
@@ -2518,6 +2798,11 @@ aside code {
     box-shadow: 0 12px 30px rgba(62, 58, 171, 0.07);
   }
 
+  .download-reco {
+    height: auto;
+    min-height: 0;
+  }
+
   .dashboard-head,
   .settings-modal-header,
   .service-status-summary {
@@ -2577,6 +2862,7 @@ aside code {
   .host-table-actions,
   .overview-host-actions,
   .session-modal-actions,
+  .approval-wait-actions,
   .session-inline-actions {
     gap: 8px;
   }
@@ -2650,7 +2936,8 @@ aside code {
   .modal,
   .settings-modal,
   .service-status-modal,
-  .session-modal {
+  .session-modal,
+  .approval-wait-modal {
     width: 100%;
     min-height: auto;
     max-height: calc(100vh - 16px);

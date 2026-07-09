@@ -66,13 +66,13 @@ func (c *sessionChannels) anyOpenEventChannel() *webrtc.DataChannel {
 	return nil
 }
 
-func runWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any)) {
-	if err := serveWebRTCSession(ctx, done, sessionURL, sessionID, runtimeCfg, emitServerEvent); err != nil && ctx.Err() == nil {
+func runWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) {
+	if err := serveWebRTCSession(ctx, done, sessionURL, sessionID, runtimeCfg, emitServerEvent, registerFallbackHandler); err != nil && ctx.Err() == nil {
 		fmt.Printf("Host WebRTC session error for %s: %v\n", sessionID, err)
 	}
 }
 
-func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any)) error {
+func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) error {
 	sessionStartedAt := time.Now()
 	peerICEServers := toPeerICEServers(runtimeCfg.ICEServers)
 	fmt.Printf("WebRTC ICE servers for %s: %d configured\n", sessionID, len(peerICEServers))
@@ -102,6 +102,7 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 	connectionDone := make(chan struct{})
 	connectionClosed := make(chan struct{})
 	var requestScreenFallback func(string)
+	var startRealtimeVideo func(string)
 	var videoStartBlockedLogged atomic.Bool
 
 	videoStartBlockStatus := func(video *screenVideoTrack) (string, string, bool, bool, bool) {
@@ -242,6 +243,12 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		fmt.Printf("WebRTC ICE state for %s: %s after %s\n", sessionID, state.String(), time.Since(sessionStartedAt).Round(time.Millisecond))
+		switch state {
+		case webrtc.ICEConnectionStateConnected, webrtc.ICEConnectionStateCompleted:
+			if !videoStarted.Load() && !videoFailed.Load() {
+				startRealtimeVideo("ice-connected")
+			}
+		}
 	})
 
 	pc.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
@@ -276,7 +283,7 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 
 	var startScreenDataChannel func(reason string)
 	var screenChannel *webrtc.DataChannel
-	startRealtimeVideo := func(trigger string) {
+	startRealtimeVideo = func(trigger string) {
 		video := getVideoTrack()
 		if video == nil || video.Track == nil || video.Stream == nil || videoFailed.Load() {
 			if videoStartBlockedLogged.CompareAndSwap(false, true) {
@@ -291,6 +298,33 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 					"video_present":  videoPresent,
 					"track_present":  trackPresent,
 					"stream_present": streamPresent,
+				})
+			}
+			return
+		}
+		if !hostAnswerPosted.Load() {
+			if videoStartBlockedLogged.CompareAndSwap(false, true) {
+				fmt.Printf("Realtime video start blocked for %s: trigger=%s reason=answer-not-posted\n", sessionID, trigger)
+				emitEvent(sessionID, map[string]any{
+					"type":      "screen_status",
+					"transport": video.Codec,
+					"action":    "rtp-start-blocked",
+					"trigger":   trigger,
+					"error":     "answer-not-posted",
+				})
+			}
+			return
+		}
+		switch pc.ConnectionState() {
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+			if videoStartBlockedLogged.CompareAndSwap(false, true) {
+				fmt.Printf("Realtime video start blocked for %s: trigger=%s reason=peer-closed\n", sessionID, trigger)
+				emitEvent(sessionID, map[string]any{
+					"type":      "screen_status",
+					"transport": video.Codec,
+					"action":    "rtp-start-blocked",
+					"trigger":   trigger,
+					"error":     "peer-closed",
 				})
 			}
 			return
@@ -447,6 +481,10 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 		if screenChannel.ReadyState() == webrtc.DataChannelStateOpen {
 			startScreenDataChannel(reason)
 		}
+	}
+	if registerFallbackHandler != nil {
+		registerFallbackHandler(requestScreenFallback)
+		defer registerFallbackHandler(nil)
 	}
 	screenChannel.OnOpen(func() {
 		flushPendingEvents()

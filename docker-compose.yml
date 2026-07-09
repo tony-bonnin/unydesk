@@ -16,12 +16,13 @@ services:
     working_dir: /app/unydesk/backend
     environment:
       UNYDESK_ASSETS: /app/unydesk/frontend/public
-      UNYDESK_PUBLIC_SERVER: "${UNYDESK_PUBLIC_SERVER:-https://unydesk.app}"
+      SERVER_URL: "${SERVER_URL:-}"
       UNYDESK_FFMPEG_WINDOWS_AMD64_URL: "${UNYDESK_FFMPEG_WINDOWS_AMD64_URL:-https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip}"
       UNYDESK_STUN_URLS: "${UNYDESK_STUN_URLS:-}"
       UNYDESK_TURN_URLS: "${UNYDESK_TURN_URLS:-}"
       UNYDESK_TURN_USERNAME: "${UNYDESK_TURN_USERNAME:-}"
       UNYDESK_TURN_CREDENTIAL: "${UNYDESK_TURN_CREDENTIAL:-}"
+      UNYDESK_ENABLE_PAIRED_UPX: "${UNYDESK_ENABLE_PAIRED_UPX:-1}"
       UNYDESK_PACK_EMBEDDED_FFMPEG: "${UNYDESK_PACK_EMBEDDED_FFMPEG:-1}"
       UNYDESK_UPX_FLAGS: "${UNYDESK_UPX_FLAGS:-}"
       UNYDESK_UPX_ULTRA: "${UNYDESK_UPX_ULTRA:-0}"
@@ -74,7 +75,7 @@ services:
         cd ./cmd/unydesk-host &&
         $(go env GOPATH)/bin/goversioninfo -64 -icon ../../../frontend/public/assets/favicon.ico -application-icon ../../../frontend/public/assets/favicon.ico -o resource.syso versioninfo.json &&
         cd /app/unydesk/backend &&
-        HOST_LDFLAGS="$${LDFLAGS_BASE} -X main.defaultServerURL=$${UNYDESK_PUBLIC_SERVER}" &&
+        HOST_LDFLAGS="$${LDFLAGS_BASE}" &&
         WINDOWS_HOST_LDFLAGS="-H=windowsgui $${HOST_LDFLAGS}" &&
         CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $${GO_BUILD_FLAGS} -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-linux-amd64 ./cmd/unydesk-host &&
         CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $${GO_BUILD_FLAGS} -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-linux-arm64 ./cmd/unydesk-host &&
@@ -84,8 +85,7 @@ services:
         CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $${GO_BUILD_FLAGS} -ldflags "$${HOST_LDFLAGS}" -o ./tmp/host-downloads/unydesk-host-darwin-arm64 ./cmd/unydesk-host &&
         for binary in \
           ./tmp/host-downloads/unydesk-host-linux-amd64 \
-          ./tmp/host-downloads/unydesk-host-linux-arm64 \
-          ./tmp/host-downloads/unydesk-host-windows-amd64.exe; do \
+          ./tmp/host-downloads/unydesk-host-linux-arm64; do \
           upx $${UPX_FLAGS} "$$binary"; \
         done &&
         cd ./tmp/host-downloads &&

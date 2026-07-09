@@ -23,12 +23,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"unydesk/remote"
 )
 
 var defaultServerURL = ""
 var defaultInstallID = ""
 
-const hostBuildID = "20260629-h264-first-stall-guard"
+const hostBuildID = "20260703-bootstrap-tray-approval"
 
 type hostInfo struct {
 	Name    string `json:"name"`
@@ -54,23 +55,30 @@ type hostSessionDispatch struct {
 	ID                 string    `json:"id"`
 	Target             string    `json:"target"`
 	Viewer             string    `json:"viewer"`
+	ViewerLabel        string    `json:"viewer_label"`
 	Status             string    `json:"status"`
 	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	OfferDigest        string    `json:"offer_digest"`
 	RoutedHostID       string    `json:"routed_host_id"`
 	RoutedHostPublicID string    `json:"routed_host_public_id"`
 	RoutedHostname     string    `json:"routed_hostname"`
 }
 
 type hostIdentity struct {
-	InstallID string
-	HostID    string
-	PublicID  string
+	InstallID      string
+	HostID         string
+	PublicID       string
+	AccessPassword string
 }
 
 type bootstrapConfig struct {
-	Server    string `json:"server"`
-	InstallID string `json:"install_id"`
-	PublicID  string `json:"public_id,omitempty"`
+	Server         string `json:"server"`
+	Domain         string `json:"domain,omitempty"`
+	InstallID      string `json:"install_id"`
+	PublicID       string `json:"public_id,omitempty"`
+	Credential     string `json:"credential,omitempty"`
+	CredentialType string `json:"credential_type,omitempty"`
 }
 
 type sessionSnapshot struct {
@@ -181,7 +189,7 @@ func main() {
 	if !windowsTrayMode {
 		printBanner(info)
 	}
-	if resolvedServerURL != "" {
+	if resolvedServerURL != "" || windowsTrayMode {
 		if serverSource != "" {
 			fmt.Printf("Server source : %s\n", serverSource)
 			fmt.Printf("Server target : %s\n", resolvedServerURL)
@@ -190,8 +198,8 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
 
-		autoOpenUI := runtime.GOOS == "windows" && !windowsTrayMode && !*noPause
-		if err := runPersistentHost(ctx, stop, resolvedServerURL, info, resolveInstallIDOverride(*installIDFlag, sidecar), autoOpenUI, windowsTrayMode); err != nil && ctx.Err() == nil {
+		autoOpenUI := runtime.GOOS == "windows" && !windowsTrayMode && !*noPause && strings.TrimSpace(currentRuntimeServerCredential()) == ""
+		if err := runPersistentHost(ctx, stop, resolvedServerURL, info, resolveInstallIDOverride(*installIDFlag, sidecar), strings.TrimSpace(sidecar.PublicID), autoOpenUI, windowsTrayMode); err != nil && ctx.Err() == nil {
 			fmt.Println()
 			fmt.Printf("Registration error: %v\n", err)
 		}
@@ -273,21 +281,15 @@ func resolveServerURL(flagValue string, sidecar bootstrapConfig) (string, string
 }
 
 func loadBootstrapConfigFromSidecar() bootstrapConfig {
-	executablePath, err := os.Executable()
-	if err != nil {
-		return bootstrapConfig{}
-	}
-	baseDir := filepath.Dir(executablePath)
-	candidates := []string{
-		filepath.Join(baseDir, "unydesk-host.json"),
-		filepath.Join(baseDir, "unydesk-host.txt"),
-		filepath.Join(baseDir, "server.txt"),
-	}
-	for _, path := range candidates {
+	for _, path := range bootstrapConfigCandidates() {
 		if value, ok := readBootstrapConfigFile(path); ok {
+			fmt.Printf("Bootstrap: loaded sidecar from %s\n", path)
+			setBootstrapRuntime(value, path)
 			return value
 		}
 	}
+	fmt.Printf("Bootstrap: no sidecar found. Checked: %s\n", strings.Join(bootstrapConfigCandidates(), ", "))
+	setBootstrapRuntime(bootstrapConfig{}, defaultBootstrapRuntimePath())
 	return bootstrapConfig{}
 }
 
@@ -307,9 +309,12 @@ func readBootstrapConfigFile(path string) (bootstrapConfig, bool) {
 			if payload.Server != "" && !looksLikeServerAddress(payload.Server) {
 				payload.Server = ""
 			}
+			payload.Domain = strings.TrimSpace(payload.Domain)
 			payload.InstallID = strings.TrimSpace(payload.InstallID)
 			payload.PublicID = strings.TrimSpace(payload.PublicID)
-			return payload, payload.Server != "" || payload.InstallID != "" || payload.PublicID != ""
+			payload.Credential = strings.TrimSpace(payload.Credential)
+			payload.CredentialType = strings.TrimSpace(payload.CredentialType)
+			return payload, payload.Server != "" || payload.Domain != "" || payload.InstallID != "" || payload.PublicID != "" || payload.Credential != ""
 		}
 	}
 	if !looksLikeServerAddress(raw) {
@@ -359,6 +364,22 @@ func resolveInstallIDOverride(flagValue string, sidecar bootstrapConfig) string 
 	}
 	if value := strings.TrimSpace(defaultInstallID); value != "" {
 		return value
+	}
+	return ""
+}
+
+func resolveServerCredential(sidecar bootstrapConfig) string {
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_SERVER_AUTH")); value != "" {
+		return normalizeAuthorizationHeader(value)
+	}
+	if value := strings.TrimSpace(sidecar.Credential); value != "" {
+		if strings.EqualFold(strings.TrimSpace(sidecar.CredentialType), "basic") || strings.EqualFold(strings.TrimSpace(sidecar.CredentialType), "") {
+			return normalizeAuthorizationHeader(value)
+		}
+		if strings.Contains(value, " ") {
+			return value
+		}
+		return strings.TrimSpace(sidecar.CredentialType) + " " + value
 	}
 	return ""
 }
@@ -482,7 +503,7 @@ func hostLogPath() string {
 	return filepath.Join(".", "unydesk-host.log")
 }
 
-func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverURL string, info hostInfo, preferredInstallID string, autoOpenUI bool, trayMode bool) error {
+func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverURL string, info hostInfo, preferredInstallID, preferredPublicID string, autoOpenUI bool, trayMode bool) error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
@@ -491,19 +512,22 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 	if err != nil {
 		return err
 	}
+	accessPassword, err := rotatePersistentHostAccessPassword()
+	if err != nil {
+		return err
+	}
 	setHostAccessEnabled(true)
-	localHostUI.setBootstrap(info, hostname, serverURL, installID)
+	publicID := strings.TrimSpace(preferredPublicID)
+	if publicID == "" {
+		publicID = remote.StablePublicID("host", installID)
+	}
+	identity := hostIdentity{InstallID: installID, PublicID: publicID, AccessPassword: accessPassword}
+	localHostUI.setBootstrap(info, hostname, serverURL, installID, publicID, accessPassword, strings.TrimSpace(currentRuntimeServerCredential()) != "")
 	startLocalHostUI(ctx, autoOpenUI)
 	if trayMode {
 		startLocalHostTray(ctx, shutdown)
 	}
 
-	wsURL, err := toWebSocketURL(serverURL)
-	if err != nil {
-		return err
-	}
-
-	identity := hostIdentity{InstallID: installID}
 	backoff := 2 * time.Second
 
 	for {
@@ -513,7 +537,34 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 		default:
 		}
 
-		err = connectAndServe(ctx, wsURL, serverURL, hostname, info, &identity)
+		currentRuntime := currentBootstrapRuntime()
+		currentServerURL, _ := resolveServerURL("", currentRuntime)
+		currentCredential := strings.TrimSpace(currentRuntimeServerCredential())
+		if strings.TrimSpace(currentServerURL) == "" || currentCredential == "" {
+			localHostUI.setAwaitingProvisioning(currentServerURL)
+			if strings.TrimSpace(currentServerURL) == "" {
+				fmt.Println("Bootstrap: waiting for a server route from the web bootstrap API.")
+			} else {
+				fmt.Println("Bootstrap: waiting for explicit provisioning credentials before registering this host.")
+			}
+			if !waitForBootstrapUpdate(ctx) {
+				return nil
+			}
+			continue
+		}
+
+		wsURL, err := toWebSocketURL(currentServerURL)
+		if err != nil {
+			localHostUI.setDisconnected(err, backoff)
+			fmt.Printf("Bootstrap: invalid server route %q (%v)\n", currentServerURL, err)
+			if !waitForBootstrapUpdate(ctx) {
+				return nil
+			}
+			continue
+		}
+
+		localHostUI.setProvisioned(currentServerURL)
+		err = connectAndServe(ctx, wsURL, currentServerURL, currentCredential, hostname, info, &identity)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -538,9 +589,9 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 	}
 }
 
-func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, info hostInfo, identity *hostIdentity) error {
+func connectAndServe(ctx context.Context, wsURL, serverURL, serverCredential, hostname string, info hostInfo, identity *hostIdentity) error {
 	dialer := *websocket.DefaultDialer
-	conn, resp, err := dialer.Dial(wsURL, serverAuthHeaders(serverURL))
+	conn, resp, err := dialer.Dial(wsURL, serverAuthHeaders(serverURL, serverCredential))
 	if err != nil {
 		return presentableWebSocketDialError(err, resp)
 	}
@@ -556,14 +607,15 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	if err := writeJSON(map[string]any{
 		"type": "register",
 		"host": map[string]any{
-			"install_id":     identity.InstallID,
-			"role":           "host",
-			"access_enabled": currentHostAccessEnabled(),
-			"name":           info.Name,
-			"os":             info.OS,
-			"arch":           info.Arch,
-			"version":        info.Version,
-			"hostname":       hostname,
+			"install_id":      identity.InstallID,
+			"role":            "host",
+			"access_enabled":  currentHostAccessEnabled(),
+			"access_password": currentHostAccessPassword(),
+			"name":            info.Name,
+			"os":              info.OS,
+			"arch":            info.Arch,
+			"version":         info.Version,
+			"hostname":        hostname,
 		},
 	}); err != nil {
 		return err
@@ -592,7 +644,7 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	identity.PublicID = registered.PublicID
 	accountURL := linkedAccountURL(serverURL, identity.InstallID, registered.PublicID)
 	localHostUI.setConnected(*identity, accountURL)
-	runtimeCfg, runtimeErr := fetchRuntimeConfig(serverURL)
+	runtimeCfg, runtimeErr := fetchRuntimeConfig(serverURL, serverCredential)
 	if runtimeErr != nil {
 		fmt.Printf("Warning: realtime runtime config unavailable: %v\n", runtimeErr)
 		runtimeCfg = runtimeConfig{Features: normalizeRuntimeFeatures(runtimeFeatureWire{}, nil, nil)}
@@ -610,6 +662,7 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	fmt.Printf("Host ID : %s\n", registered.ID)
 	fmt.Printf("Public ID : %s\n", registered.PublicID)
 	fmt.Printf("Install ID : %s\n", identity.InstallID)
+	fmt.Printf("Access Password : %s\n", currentHostAccessPassword())
 	fmt.Println("Transport : WebSocket")
 	fmt.Printf("WebRTC ICE : %d server(s)\n", len(runtimeCfg.ICEServers))
 	fmt.Printf("Realtime : H265=%t H264=%t AV1=%t QUIC=%t codecs=%s\n", runtimeCfg.Features.H265, runtimeCfg.Features.H264, runtimeCfg.Features.AV1, runtimeCfg.Features.QUIC, strings.Join(runtimeCfg.Features.PreferredVideoCodecs, ","))
@@ -619,25 +672,63 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 	fmt.Println()
 	fmt.Println("Heartbeat loop started. Press Ctrl+C to stop.")
 
-	activeSessions := make(map[string]chan struct{})
+	type activeSessionWorker struct {
+		stop             chan struct{}
+		startedAt        time.Time
+		sessionUpdatedAt time.Time
+		offerDigest      string
+		requestFallback  func(string)
+	}
+	activeSessions := make(map[string]activeSessionWorker)
 	var activeMu sync.Mutex
 	defer func() {
 		activeMu.Lock()
 		defer activeMu.Unlock()
-		for _, stop := range activeSessions {
-			close(stop)
+		for _, worker := range activeSessions {
+			close(worker.stop)
 		}
 	}()
 
-	startSessionRealtime := func(sessionID string) {
+	sessionControlActive := func(sessionID string) bool {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			return false
+		}
 		activeMu.Lock()
-		if _, exists := activeSessions[sessionID]; exists {
-			activeMu.Unlock()
-			fmt.Printf("Realtime : session %s already active; keeping existing WebRTC worker\n", sessionID)
+		defer activeMu.Unlock()
+		_, exists := activeSessions[sessionID]
+		return exists
+	}
+
+	startSessionRealtime := func(session hostSessionDispatch, restart bool) {
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
 			return
 		}
+		activeMu.Lock()
+		if worker, exists := activeSessions[sessionID]; exists {
+			if !restart {
+				activeMu.Unlock()
+				fmt.Printf("Realtime : session %s already active; keeping existing WebRTC worker\n", sessionID)
+				return
+			}
+			incomingOfferDigest := strings.TrimSpace(session.OfferDigest)
+			currentOfferDigest := strings.TrimSpace(worker.offerDigest)
+			if incomingOfferDigest == "" || currentOfferDigest == "" || incomingOfferDigest == currentOfferDigest {
+				activeMu.Unlock()
+				if currentOfferDigest != "" {
+					fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; offer digest %s is already active\n", sessionID, currentOfferDigest)
+				} else {
+					fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; worker is already active\n", sessionID)
+				}
+				return
+			}
+			close(worker.stop)
+			delete(activeSessions, sessionID)
+			fmt.Printf("Realtime : session %s received a fresh offer; restarting WebRTC worker after %s (%s -> %s)\n", sessionID, time.Since(worker.startedAt).Round(time.Millisecond), currentOfferDigest, incomingOfferDigest)
+		}
 		stop := make(chan struct{})
-		activeSessions[sessionID] = stop
+		activeSessions[sessionID] = activeSessionWorker{stop: stop, startedAt: time.Now(), sessionUpdatedAt: session.UpdatedAt, offerDigest: strings.TrimSpace(session.OfferDigest)}
 		activeMu.Unlock()
 
 		sessionURL := strings.TrimRight(serverURL, "/") + "/api/v1/sessions/" + url.PathEscape(sessionID)
@@ -656,12 +747,21 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 		go func() {
 			defer func() {
 				activeMu.Lock()
-				if current, ok := activeSessions[sessionID]; ok && current == stop {
+				if current, ok := activeSessions[sessionID]; ok && current.stop == stop {
 					delete(activeSessions, sessionID)
 				}
 				activeMu.Unlock()
 			}()
-			runWebRTCSession(ctx, stop, sessionURL, sessionID, runtimeCfg, emitServerEvent)
+			runWebRTCSession(ctx, stop, sessionURL, sessionID, runtimeCfg, emitServerEvent, func(handler func(string)) {
+				activeMu.Lock()
+				defer activeMu.Unlock()
+				current, ok := activeSessions[sessionID]
+				if !ok || current.stop != stop {
+					return
+				}
+				current.requestFallback = handler
+				activeSessions[sessionID] = current
+			})
 		}()
 	}
 
@@ -688,7 +788,48 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 			}
 			return nil
 		}
-		fmt.Println("Access   : auto-accepted; local confirmation is temporarily disabled.")
+		if runtime.GOOS == "windows" {
+			if hasCachedApprovedHostAccess(session) {
+				fmt.Println("Access   : recent local approval reused for this session after a brief interruption.")
+				if err := writeJSON(map[string]string{
+					"type":       "session_ack",
+					"session_id": session.ID,
+					"action":     "accept",
+				}); err != nil {
+					return fmt.Errorf("session ack send failed: %w", err)
+				}
+				restartRealtime := strings.EqualFold(strings.TrimSpace(session.Status), "offered")
+				startSessionRealtime(session, restartRealtime)
+				return nil
+			}
+			fmt.Println("Access   : waiting for local approval from the tray menu.")
+			if !queuePendingHostApproval(session, func(action string) {
+				if err := writeJSON(map[string]string{
+					"type":       "session_ack",
+					"session_id": session.ID,
+					"action":     action,
+				}); err != nil {
+					fmt.Printf("session ack send failed: %v\n", err)
+					return
+				}
+				if action != "accept" {
+					return
+				}
+				restartRealtime := strings.EqualFold(strings.TrimSpace(session.Status), "offered")
+				startSessionRealtime(session, restartRealtime)
+			}) {
+				fmt.Println("Access   : another request is already waiting for approval, refusing this one as busy.")
+				if err := writeJSON(map[string]string{
+					"type":       "session_ack",
+					"session_id": session.ID,
+					"action":     "busy",
+				}); err != nil {
+					return fmt.Errorf("session busy send failed: %w", err)
+				}
+			}
+			return nil
+		}
+		fmt.Println("Access   : auto-accepted; local confirmation is unavailable on this platform.")
 		if err := writeJSON(map[string]string{
 			"type":       "session_ack",
 			"session_id": session.ID,
@@ -696,7 +837,42 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 		}); err != nil {
 			return fmt.Errorf("session ack send failed: %w", err)
 		}
-		startSessionRealtime(session.ID)
+		restartRealtime := strings.EqualFold(strings.TrimSpace(session.Status), "offered")
+		startSessionRealtime(session, restartRealtime)
+		return nil
+	}
+
+	repromptDispatch := func(session hostSessionDispatch) error {
+		localHostUI.noteSession(session)
+		if !currentHostAccessEnabled() {
+			fmt.Println("Access   : local access is paused, approval prompt not reopened.")
+			return nil
+		}
+		if hasCachedApprovedHostAccess(session) {
+			fmt.Println("Access   : recent local approval already covers this session.")
+			return nil
+		}
+		if runtime.GOOS != "windows" {
+			return nil
+		}
+		fmt.Println("Access   : reopening local approval prompt.")
+		if !repromptPendingHostApproval(session, func(action string) {
+			if err := writeJSON(map[string]string{
+				"type":       "session_ack",
+				"session_id": session.ID,
+				"action":     action,
+			}); err != nil {
+				fmt.Printf("session ack send failed: %v\n", err)
+				return
+			}
+			if action != "accept" {
+				return
+			}
+			restartRealtime := strings.EqualFold(strings.TrimSpace(session.Status), "offered")
+			startSessionRealtime(session, restartRealtime)
+		}) {
+			fmt.Println("Access   : unable to reopen approval prompt while another request is pending.")
+		}
 		return nil
 	}
 
@@ -709,8 +885,9 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 			return writeJSON(map[string]any{
 				"type": "heartbeat",
 				"payload": map[string]any{
-					"role":           "host",
-					"access_enabled": currentHostAccessEnabled(),
+					"role":            "host",
+					"access_enabled":  currentHostAccessEnabled(),
+					"access_password": currentHostAccessPassword(),
 				},
 			})
 		}
@@ -759,7 +936,38 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, hostname string, inf
 			}
 		case "session_acknowledged":
 			fmt.Printf("Acked    : %s (%s)\n", msg.SessionID, msg.Action)
+		case "approval_prompt":
+			for _, session := range msg.Sessions {
+				if err := repromptDispatch(session); err != nil {
+					return err
+				}
+			}
 		case "control":
+			if reason, ok := parseScreenFallbackRequest(msg.Payload); ok {
+				activeMu.Lock()
+				worker, exists := activeSessions[msg.SessionID]
+				fallback := worker.requestFallback
+				activeMu.Unlock()
+				if exists && fallback != nil {
+					fmt.Printf("Host control %s screen fallback requested via signaling: %s\n", msg.SessionID, reason)
+					fallback(reason)
+					continue
+				}
+			}
+			if !sessionControlActive(msg.SessionID) {
+				fmt.Printf("Host control %s blocked until local approval is granted\n", msg.SessionID)
+				if err := writeJSON(map[string]any{
+					"type":       "session_event",
+					"session_id": msg.SessionID,
+					"payload": map[string]any{
+						"type":   "control_blocked",
+						"reason": "approval-required",
+					},
+				}); err != nil {
+					fmt.Printf("Host session event %s blocked-notice send failed: %v\n", msg.SessionID, err)
+				}
+				continue
+			}
 			handleHostControlMessage(msg.SessionID, msg.Payload, func(sessionID string, payload map[string]any) {
 				if sessionID == "" || len(payload) == 0 {
 					return
@@ -933,12 +1141,12 @@ func handleHostControlMessage(sessionID string, raw json.RawMessage, emit func(s
 	case "file_cancel":
 		cancelIncomingFileTransfer(sessionID, payload, "cancelled by viewer", emit)
 	case "screen_fallback_request":
-		fmt.Printf("Host control %s ignored signaling fallback request; peer data channel owns screen fallback\n", sessionID)
+		fmt.Printf("Host control %s could not route signaling fallback request to an active WebRTC worker\n", sessionID)
 		emit(sessionID, map[string]any{
 			"type":      "screen_status",
 			"transport": "video",
-			"action":    "fallback-ignored",
-			"reason":    "screen fallback requests must use the peer data channel",
+			"action":    "fallback-unavailable",
+			"reason":    "no active WebRTC worker could accept the signaling fallback request",
 		})
 	default:
 		fmt.Printf("Host control %s unsupported type=%v\n", sessionID, payload["type"])
@@ -963,10 +1171,10 @@ func presentableWebSocketDialError(err error, resp *http.Response) error {
 	return fmt.Errorf("%w (%s)", err, detail)
 }
 
-func serverAuthHeaders(serverURL string) http.Header {
+func serverAuthHeaders(serverURL, explicitCredential string) http.Header {
 	header := http.Header{}
-	if value := strings.TrimSpace(os.Getenv("UNYDESK_SERVER_AUTH")); value != "" {
-		header.Set("Authorization", normalizeAuthorizationHeader(value))
+	if value := strings.TrimSpace(explicitCredential); value != "" {
+		header.Set("Authorization", value)
 		return header
 	}
 	parsed, err := url.Parse(serverURL)

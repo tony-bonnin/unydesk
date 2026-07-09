@@ -1,5 +1,6 @@
 name: UnyDesk
 listen_addr: ":8890"
+server_url: ""
 security:
   allow_origin: "*"
 remote:
@@ -7,6 +8,12 @@ remote:
   host_heartbeat_seconds: 35
 webrtc:
   ice_servers: []
+http3:
+  enabled: false
+  cert_file: /etc/ssl/unydesk/cert.pem
+  key_file: /etc/ssl/unydesk/key.pem
+  port: 8443
+  redirect_http: true
 features:
   webrtc: true
   h265: true
@@ -22,3 +29,5 @@ paths:
   host_downloads_dir: tmp/host-downloads
   frontend_dir: ../frontend/public
   users_file: settings/users.json
+  hosts_file: settings/hosts.json
+  trusted_hosts_file: settings/trusted-hosts.json

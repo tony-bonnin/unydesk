@@ -15,6 +15,7 @@ type Session struct {
 	ID                  string        `json:"id"`
 	Target              string        `json:"target"`
 	Viewer              string        `json:"viewer"`
+	ViewerLabel         string        `json:"viewer_label,omitempty"`
 	ViewerAuthMode      string        `json:"viewer_auth_mode,omitempty"`
 	Status              SessionStatus `json:"status"`
 	CreatedAt           time.Time     `json:"created_at"`
@@ -42,6 +43,7 @@ type Session struct {
 type CreateSessionRequest struct {
 	Target         string `json:"target"`
 	Viewer         string `json:"viewer"`
+	ViewerLabel    string `json:"viewer_label,omitempty"`
 	ViewerAuthMode string `json:"viewer_auth_mode,omitempty"`
 }
 

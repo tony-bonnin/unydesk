@@ -2,7 +2,10 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,12 +24,24 @@ var (
 )
 
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	DisplayName  string    `json:"display_name"`
-	Avatar       string    `json:"avatar,omitempty"`
-	PasswordHash string    `json:"password_hash"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID                  string               `json:"id"`
+	Email               string               `json:"email"`
+	DisplayName         string               `json:"display_name"`
+	Avatar              string               `json:"avatar,omitempty"`
+	PasswordHash        string               `json:"password_hash"`
+	HostProvisionTokens []HostProvisionToken `json:"host_provision_tokens,omitempty"`
+	CreatedAt           time.Time            `json:"created_at"`
+}
+
+type HostProvisionToken struct {
+	ID         string    `json:"id"`
+	Label      string    `json:"label,omitempty"`
+	InstallID  string    `json:"install_id,omitempty"`
+	PublicID   string    `json:"public_id,omitempty"`
+	Hostname   string    `json:"hostname,omitempty"`
+	TokenHash  string    `json:"token_hash"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at,omitempty"`
 }
 
 type PublicUser struct {
@@ -148,6 +163,25 @@ func (s *Store) Login(email, password string) (PublicUser, string, error) {
 	return sanitizeUser(user), token, nil
 }
 
+func (s *Store) ValidateCredentials(email, password string) (PublicUser, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || strings.TrimSpace(password) == "" {
+		return PublicUser{}, ErrInvalidCredentials
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	user, exists := s.users[email]
+	if !exists {
+		return PublicUser{}, ErrInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return PublicUser{}, ErrInvalidCredentials
+	}
+	return sanitizeUser(user), nil
+}
+
 func (s *Store) CurrentUser(sessionToken string) (PublicUser, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -239,6 +273,84 @@ func (s *Store) UpdateProfile(currentEmail, newEmail, displayName, avatar string
 	return sanitizeUser(user), nil
 }
 
+func (s *Store) IssueProvisionToken(email, label, installID, publicID, hostname string) (HostProvisionToken, string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return HostProvisionToken{}, "", ErrInvalidCredentials
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[email]
+	if !exists {
+		return HostProvisionToken{}, "", ErrInvalidCredentials
+	}
+
+	plainToken := "uph_" + newToken(24)
+	hashedToken := hashProvisionToken(plainToken)
+	now := time.Now().UTC()
+	token := HostProvisionToken{
+		ID:        newToken(12),
+		Label:     strings.TrimSpace(label),
+		InstallID: strings.TrimSpace(installID),
+		PublicID:  strings.TrimSpace(publicID),
+		Hostname:  strings.TrimSpace(hostname),
+		TokenHash: hashedToken,
+		CreatedAt: now,
+	}
+
+	filtered := make([]HostProvisionToken, 0, len(user.HostProvisionTokens)+1)
+	for _, existing := range user.HostProvisionTokens {
+		if token.InstallID != "" && strings.EqualFold(strings.TrimSpace(existing.InstallID), token.InstallID) {
+			continue
+		}
+		if token.PublicID != "" && strings.EqualFold(strings.TrimSpace(existing.PublicID), token.PublicID) {
+			continue
+		}
+		if token.InstallID == "" && token.PublicID == "" &&
+			strings.TrimSpace(existing.InstallID) == "" &&
+			strings.TrimSpace(existing.PublicID) == "" &&
+			strings.EqualFold(strings.TrimSpace(existing.Label), token.Label) {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	filtered = append(filtered, token)
+	user.HostProvisionTokens = filtered
+	s.users[email] = user
+	if err := s.saveLocked(); err != nil {
+		return HostProvisionToken{}, "", err
+	}
+	return token, plainToken, nil
+}
+
+func (s *Store) ValidateProvisionToken(token string) (PublicUser, HostProvisionToken, error) {
+	hashedToken := hashProvisionToken(token)
+	if hashedToken == "" {
+		return PublicUser{}, HostProvisionToken{}, ErrInvalidCredentials
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for email, user := range s.users {
+		for idx, provision := range user.HostProvisionTokens {
+			if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(provision.TokenHash)), []byte(hashedToken)) != 1 {
+				continue
+			}
+			provision.LastUsedAt = time.Now().UTC()
+			user.HostProvisionTokens[idx] = provision
+			s.users[email] = user
+			if err := s.saveLocked(); err != nil {
+				return PublicUser{}, HostProvisionToken{}, err
+			}
+			return sanitizeUser(user), provision, nil
+		}
+	}
+	return PublicUser{}, HostProvisionToken{}, ErrInvalidCredentials
+}
+
 func sanitizeUser(user User) PublicUser {
 	return PublicUser{
 		ID:          user.ID,
@@ -247,6 +359,15 @@ func sanitizeUser(user User) PublicUser {
 		Avatar:      user.Avatar,
 		CreatedAt:   user.CreatedAt,
 	}
+}
+
+func hashProvisionToken(token string) string {
+	value := strings.TrimSpace(token)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func newToken(size int) string {

@@ -6,18 +6,18 @@
   <title>UnyDesk | SelfHosted Free Access</title>
   <meta name="theme-color" content="#0800b1">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=20260629-card-radius">
+  <link rel="stylesheet" href="/styles.css?v=20260630-local-font">
   <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
   <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
   <noscript>
     <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
     <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
   </noscript>
-  <script defer src="/deferred-styles.js"></script>
-  <script defer src="/app.js?v=20260629-client-ip-fallback"></script>
+  <script defer src="/js/deferred-styles.js"></script>
+  <script defer src="/js/i18n.js?v=20260630-no-dom-observer"></script>
+  <script defer src="/js/local-host-bridge.js?v=20260703-claim-bridge"></script>
+  <script defer src="/js/password-toggle.js?v=20260703-password-eye"></script>
+  <script defer src="/app.js?v=20260703-claim-bridge"></script>
   <script defer src="/vendor/alpinejs-csp.min.js"></script>
 </head>
 <body x-data="unydeskLanding()" x-init="boot()">
@@ -40,6 +40,11 @@
           </button>
         </template>
         <div class="topbar-badge">Go App · Alpine-friendly · API-first</div>
+        <div class="language-switcher" data-i18n-skip aria-label="Language">
+          <button type="button" data-locale="en" aria-label="English" title="English"><img src="/assets/flag-gb.svg" alt="" class="locale-flag"></button>
+          <button type="button" data-locale="fr" aria-label="Français" title="Français"><img src="/assets/flag-fr.svg" alt="" class="locale-flag"></button>
+          <button type="button" data-locale="de" aria-label="Deutsch" title="Deutsch"><img src="/assets/flag-de.svg" alt="" class="locale-flag"></button>
+        </div>
       </div>
     </header>
 
@@ -55,7 +60,7 @@
         <div class="stats-strip">
           <div class="stat-block">
             <span class="stat-kicker">Client IP</span>
-            <span class="stat-value brand" x-text="clientIPDisplay()" :title="clientIP()"></span>
+            <span class="stat-value brand" x-text="tr(clientIPDisplay())" :title="clientIP()"></span>
           </div>
           <div class="stat-block">
             <span class="stat-kicker">Direct Address</span>
@@ -69,7 +74,7 @@
           </div>
           <div class="stat-block">
             <span class="stat-kicker">Version</span>
-            <span class="stat-value" x-text="info.version"></span>
+            <span class="stat-value" x-text="tr(info.version)"></span>
           </div>
         </div>
 
@@ -77,9 +82,9 @@
           <div class="identity">
             <div class="identity-label">UnyDesk ID</div>
             <div class="identity-row">
-              <div class="identity-code" x-text="browserIdentity.public_id"></div>
+              <div class="identity-code" x-text="tr(displayedPublicID())"></div>
               <div class="copy-controls">
-                <button class="copy-btn" type="button" @click="copy(browserIdentity.public_id, 'id')" aria-label="Copy ID" title="Copy ID">
+                <button class="copy-btn" type="button" @click="copy(displayedPublicID(), 'id')" aria-label="Copy ID" title="Copy ID">
                   <i class="bi bi-copy"></i>
                 </button>
                 <span class="copy-feedback" :class="{ show: copiedField === 'id' }">ID copied!</span>
@@ -87,18 +92,25 @@
             </div>
           </div>
           <div class="identity">
-            <div class="identity-label">Ephemeral Client Password</div>
+            <div class="identity-label">Host Password</div>
             <div class="identity-row">
-              <div class="identity-code direct-address-code standalone-password-code" x-text="standalonePassword"></div>
-              <div class="copy-controls standalone-password-controls">
-                <button class="copy-btn standalone-regen-btn" type="button" @click="regenerateStandalonePassword()" aria-label="Regenerate standalone password" title="Regenerate standalone password">
-                  <i class="fa-solid fa-arrows-rotate" :class="{ 'is-spinning': standaloneRegenActive }"></i>
-                </button>
-                <button class="copy-btn" type="button" @click="copy(standalonePassword, 'standalone-password')" aria-label="Copy standalone password" title="Copy standalone password">
+              <div class="identity-code direct-address-code standalone-password-code" x-text="tr(hostPasswordDisplay())"></div>
+              <div class="copy-controls" x-show="localHostRuntime.available">
+                <button class="copy-btn" type="button" @click="copy(localHostRuntime.access_password, 'host-password')" aria-label="Copy host password" title="Copy host password">
                   <i class="bi bi-copy"></i>
                 </button>
-                <span class="copy-feedback" :class="{ show: copiedField === 'standalone-password' }">Password copied!</span>
+                <button class="copy-btn" type="button" @click="rotateLocalHostPassword()" :disabled="hostPasswordBusy" aria-label="Generate new password" title="Generate new password">
+                  <i class="fa-solid fa-rotate"></i>
+                </button>
+                <span class="copy-feedback" :class="{ show: copiedField === 'host-password' }">Password copied!</span>
               </div>
+            </div>
+            <div class="session-status-line standalone-status-line" x-text="tr(hostPasswordNote())"></div>
+            <div class="session-inline-actions standalone-actions" x-show="showLocalHostClaimAction()">
+              <button class="btn btn-secondary" type="button" @click="claimLocalHost()" :disabled="hostClaimBusy">
+                <i class="fa-solid fa-link"></i>
+                <span x-text="tr(localHostClaimCTA())"></span>
+              </button>
             </div>
           </div>
         </div>
@@ -111,16 +123,16 @@
 
       <aside class="panel-soft">
         <div class="download-reco">
-          <strong x-text="downloadTitle()"></strong>
+          <strong x-text="tr(downloadTitle())"></strong>
           <p>Detected in your browser. If needed, open the full download list.</p>
           <div class="download-actions">
-            <a class="download-link" :class="{ secondary: downloadChoice.disabled }" :href="downloadChoice.href" :aria-disabled="downloadChoice.disabled || downloadChoice.href === '#' ? 'true' : 'false'" @click="if (downloadChoice.disabled) $event.preventDefault()">
+            <a class="download-link" :class="{ secondary: downloadChoice.disabled }" :href="downloadChoice.disabled ? '#' : downloadChoice.href" :aria-disabled="downloadChoice.disabled || downloadChoice.href === '#' ? 'true' : 'false'">
               <i :class="downloadChoice.icon || 'fa-solid fa-download'"></i>
-              <span x-text="downloadChoice.cta"></span>
+              <span x-text="tr(downloadChoice.cta)"></span>
             </a>
             <button class="btn btn-secondary" type="button" @click="openDownloads()">All host downloads</button>
           </div>
-          <div class="download-meta" x-text="downloadChoice.meta"></div>
+          <div class="download-meta" x-text="tr(downloadChoice.meta)"></div>
           <div class="download-note">
             Windows builds include metadata and <code>SHA256</code> checksums. SmartScreen warnings may still appear until code signing is enabled.
           </div>
@@ -132,25 +144,30 @@
 
         <div class="standalone-card">
           <div class="connection-mode-head">
-            <strong>Standalone Client</strong>
-            <span>Open a direct viewer from this landing page with your local client ID and an ephemeral password.</span>
+            <strong>Connect to Host</strong>
+            <span>Enter the remote UnyDesk ID and the password currently shown by the host binary on its local browser page.</span>
           </div>
           <div class="standalone-form">
-            <label class="auth-label">
-              <span><i class="fa-solid fa-tv"></i> Client ID</span>
-              <input class="auth-input" type="text" :value="browserIdentity.public_id" readonly>
-            </label>
             <label class="auth-label">
               <span><i class="fa-solid fa-tower-broadcast"></i> Target Host ID</span>
               <input class="auth-input" type="text" placeholder="097 845 659 or host name" x-model="standaloneTarget" @keydown.enter="openStandaloneClient()">
             </label>
+            <label class="auth-label">
+              <span><i class="fa-solid fa-key"></i> Host Password</span>
+              <div class="password-input-wrap">
+                <input class="auth-input" type="password" data-password-toggle placeholder="Current password shown on the host" x-model="standaloneHostPassword" @keydown.enter="openStandaloneClient()">
+                <button class="password-toggle-btn" type="button" data-password-toggle-btn data-show-label="Show password" data-hide-label="Hide password">
+                  <i class="fa-regular fa-eye"></i>
+                </button>
+              </div>
+            </label>
             <div class="session-inline-actions standalone-actions">
               <button class="btn btn-primary" type="button" @click="openStandaloneClient()" :disabled="standaloneBusy">
                 <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                <span x-text="standaloneBusy ? 'Opening...' : 'Open standalone client'"></span>
+                <span x-text="tr(standaloneBusy ? 'Opening...' : 'Connect to host')"></span>
               </button>
             </div>
-            <div class="session-status-line standalone-status-line" x-text="standaloneStatus"></div>
+            <div class="session-status-line standalone-status-line" x-text="tr(standaloneStatus)"></div>
           </div>
         </div>
       </aside>
@@ -176,13 +193,13 @@
           <template x-for="item in downloads" :key="item.href">
             <div class="download-card">
               <div>
-                <strong x-text="item.title"></strong>
-                <span x-text="item.description"></span>
+                <strong x-text="tr(item.title)"></strong>
+                <span x-text="tr(item.description)"></span>
               </div>
               <div class="download-actions">
-                <a class="download-link" :class="{ secondary: item.secondary || item.disabled }" :href="item.href" :aria-disabled="item.disabled ? 'true' : 'false'" @click="if (item.disabled) $event.preventDefault()">
+                <a class="download-link" :class="{ secondary: item.secondary || item.disabled }" :href="item.disabled ? '#' : item.href" :aria-disabled="item.disabled ? 'true' : 'false'">
                   <i :class="item.icon || 'fa-solid fa-download'"></i>
-                  <span x-text="item.cta || 'Download'"></span>
+                  <span x-text="tr(item.cta || 'Download')"></span>
                 </a>
                 <a class="download-link secondary" x-show="item.archiveHref" :href="item.archiveHref">
                   <i class="fa-solid fa-file-zipper"></i>
@@ -199,7 +216,7 @@
             <a class="btn btn-secondary" href="/download/host/checksums" target="_blank" rel="noopener">Open SHA256SUMS</a>
             <button class="btn btn-secondary" type="button" @click="loadChecksums()">Load in modal</button>
           </div>
-          <pre class="checksum-view" x-text="checksumsText"></pre>
+          <pre class="checksum-view" x-text="tr(checksumsText)"></pre>
         </div>
       </div>
     </div>
@@ -222,14 +239,19 @@
           </label>
           <label class="auth-label">
             <span><i class="bi bi-key"></i> Password</span>
-            <input class="auth-input" id="login-password" name="password" type="password" placeholder="Password" x-model="authForm.password" autocomplete="current-password" @keydown.enter="submitAuth()">
+            <div class="password-input-wrap">
+              <input class="auth-input" id="login-password" name="password" type="password" data-password-toggle placeholder="Password" x-model="authForm.password" autocomplete="current-password" @keydown.enter="submitAuth()">
+              <button class="password-toggle-btn" type="button" data-password-toggle-btn data-show-label="Show password" data-hide-label="Hide password">
+                <i class="fa-regular fa-eye"></i>
+              </button>
+            </div>
           </label>
           <button class="btn btn-primary auth-submit" type="submit">
             <i class="fa-solid fa-right-to-bracket"></i>
             <span>Sign In</span>
           </button>
         </form>
-        <div class="auth-error" x-show="authError" x-text="authError"></div>
+        <div class="auth-error" x-show="authError" x-text="tr(authError)"></div>
       </div>
     </div>
   </div>
@@ -238,19 +260,19 @@
     <div class="modal service-status-modal" role="dialog" aria-modal="true" aria-labelledby="service-status-modal-title">
       <div class="modal-head">
         <div>
-          <h3 id="service-status-modal-title" x-text="serviceStatus.title"></h3>
-          <p x-text="serviceStatus.subtitle"></p>
+          <h3 id="service-status-modal-title" x-text="tr(serviceStatus.title)"></h3>
+          <p x-text="tr(serviceStatus.subtitle)"></p>
         </div>
         <button class="modal-close" type="button" @click="closeServiceStatus()">Close</button>
       </div>
       <div class="modal-body service-status-body">
         <div class="service-status-summary">
           <div class="service-status-pill" :class="serviceStatus.ok ? 'is-ok' : 'is-error'">
-            <span x-text="serviceStatus.ok ? 'Available' : 'Unavailable'"></span>
+            <span x-text="tr(serviceStatus.ok ? 'Available' : 'Unavailable')"></span>
           </div>
-          <div class="service-status-meta" x-text="serviceStatus.meta"></div>
+          <div class="service-status-meta" x-text="tr(serviceStatus.meta)"></div>
         </div>
-        <pre class="checksum-view service-status-view" x-text="serviceStatus.body"></pre>
+        <pre class="checksum-view service-status-view" x-text="tr(serviceStatus.body)"></pre>
       </div>
     </div>
   </div>

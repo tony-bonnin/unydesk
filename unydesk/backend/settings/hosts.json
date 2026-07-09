@@ -1,0 +1,36 @@
+[
+  {
+    "id": "7fcb9cf2216b8263",
+    "install_id": "20e901b7c7f488eec5c54e725b03c62da9e699eb08178b52",
+    "role": "host",
+    "access_enabled": true,
+    "access_mode": "password",
+    "name": "UnyDesk Host",
+    "os": "windows",
+    "arch": "amd64",
+    "version": "0.1.0-alpha+20260703-bootstrap-tray-approval",
+    "hostname": "TRINITY-NETBOOK",
+    "public_id": "736 237 092",
+    "status": "online",
+    "registered_at": "2026-07-03T18:43:45.698083165Z",
+    "last_seen_at": "2026-07-06T05:16:36.057198926Z",
+    "password_seen_at": "2026-07-06T05:16:36.057198926Z"
+  },
+  {
+    "id": "2ee614fb621ca938",
+    "install_id": "d8b949930332c60431dba67379572d9db0f8fd6b3e8417ad",
+    "role": "host",
+    "access_enabled": true,
+    "access_mode": "password",
+    "name": "UnyDesk Host",
+    "os": "windows",
+    "arch": "amd64",
+    "version": "0.1.0-alpha+20260703-bootstrap-tray-approval",
+    "hostname": "STOPYZ",
+    "public_id": "600 188 968",
+    "status": "online",
+    "registered_at": "2026-07-05T14:31:45.369102251Z",
+    "last_seen_at": "2026-07-05T17:24:22.353182267Z",
+    "password_seen_at": "2026-07-05T17:24:22.353181351Z"
+  }
+]

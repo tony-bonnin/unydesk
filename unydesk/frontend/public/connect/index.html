@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UnyDesk | Standalone Client</title>
+  <title>UnyDesk | Direct Client</title>
   <meta name="theme-color" content="#3e3aab">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260630-local-font">
   <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
   <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
   <noscript>
     <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
     <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
   </noscript>
-  <script defer src="/deferred-styles.js?v=20260628-rtpdiag"></script>
-  <script defer src="/control.js?v=20260628-rtpdiag"></script>
+  <script defer src="/js/deferred-styles.js?v=20260628-rtpdiag"></script>
+  <script defer src="/js/i18n.js?v=20260630-no-dom-observer"></script>
+    <script type="module" defer src="/js/control.js?v=20260704-stable-h264"></script>
 </head>
 <body class="account-app standalone-connect-page">
   <div class="account-dashboard-shell">
@@ -22,7 +23,7 @@
       <header class="account-workspace-topbar">
         <div class="account-topbar-left">
           <div>
-            <strong class="account-topbar-title">Standalone Client</strong>
+            <strong class="account-topbar-title">Direct Client</strong>
           </div>
         </div>
         <div class="account-topbar-right">
@@ -30,6 +31,11 @@
             <i class="fa-solid fa-arrow-left"></i>
             <span>Back to landing</span>
           </a>
+          <div class="language-switcher" data-i18n-skip aria-label="Language">
+            <button type="button" data-locale="en" aria-label="English" title="English"><img src="/assets/flag-gb.svg" alt="" class="locale-flag"></button>
+            <button type="button" data-locale="fr" aria-label="Français" title="Français"><img src="/assets/flag-fr.svg" alt="" class="locale-flag"></button>
+            <button type="button" data-locale="de" aria-label="Deutsch" title="Deutsch"><img src="/assets/flag-de.svg" alt="" class="locale-flag"></button>
+          </div>
         </div>
       </header>
 
@@ -40,8 +46,8 @@
 
         <section class="account-panel is-active">
           <div class="account-panel-copy">
-            <h1 class="slogan" id="session-page-title">Standalone Client</h1>
-            <p id="session-page-subtitle">Open a direct viewer session from the landing page with an ephemeral client password.</p>
+            <h1 class="slogan" id="session-page-title">Direct Client</h1>
+            <p id="session-page-subtitle">Live control session opened after validating the host password from the landing page.</p>
           </div>
 
           <div class="session-control-grid">
@@ -200,7 +206,20 @@
                   <strong id="session-detail-host-ack">—</strong>
                 </div>
               </div>
-              <div class="dashboard-form">
+            </section>
+
+            <section class="settings-card session-diagnostics-card">
+              <div class="dashboard-head session-log-head">
+                <div>
+                  <strong><i class="fa-solid fa-terminal"></i> Diagnostics Logs</strong>
+                  <span>Enable only when debugging latency, codec fallback, signaling, clipboard, or file transfer.</span>
+                </div>
+                <label class="session-log-toggle">
+                  <input type="checkbox" id="session-log-toggle" checked>
+                  <span>Enable live logs</span>
+                </label>
+              </div>
+              <div class="dashboard-form session-log-body" id="session-log-body">
                 <label class="auth-label">
                   <span><i class="fa-solid fa-terminal"></i> Transport Log</span>
                   <textarea class="auth-input session-preview session-log" id="session-transport-log" readonly placeholder="Live control, screen, clipboard, and file events will appear here."></textarea>

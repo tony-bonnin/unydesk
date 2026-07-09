@@ -19,7 +19,10 @@ func newPreferredScreenVideoTrack(pc *webrtc.PeerConnection, sessionID, offerSDP
 	if !features.WebRTC {
 		return nil, fmt.Errorf("webrtc disabled by runtime policy")
 	}
-	codecs := features.PreferredVideoCodecs
+	codecs := offeredScreenVideoCodecs(offerSDP, features)
+	if len(codecs) == 0 {
+		codecs = features.PreferredVideoCodecs
+	}
 	if len(codecs) == 0 {
 		codecs = []string{"h264", "h265", "av1"}
 	}
@@ -86,6 +89,96 @@ func newPreferredScreenVideoTrack(pc *webrtc.PeerConnection, sessionID, offerSDP
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("no compatible realtime video codec offered")
+}
+
+func offeredScreenVideoCodecs(sdp string, features runtimeFeatures) []string {
+	allowed := map[string]bool{}
+	for _, raw := range features.PreferredVideoCodecs {
+		codec := normalizeScreenVideoCodecName(raw)
+		if codec == "" {
+			continue
+		}
+		allowed[codec] = true
+	}
+	if len(allowed) == 0 {
+		allowed["h264"] = features.H264
+		allowed["h265"] = features.H265
+		allowed["av1"] = features.AV1
+	}
+
+	lines := strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n")
+	payloadOrder := []string{}
+	payloadCodecs := map[string]string{}
+	inVideo := false
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "m=") {
+			inVideo = strings.HasPrefix(strings.ToLower(line), "m=video")
+			if inVideo {
+				fields := strings.Fields(line)
+				if len(fields) > 3 {
+					payloadOrder = append(payloadOrder, fields[3:]...)
+				}
+			}
+			continue
+		}
+		if !inVideo || !strings.HasPrefix(strings.ToLower(line), "a=rtpmap:") {
+			continue
+		}
+		rtpmap := strings.TrimPrefix(line, "a=rtpmap:")
+		parts := strings.Fields(rtpmap)
+		if len(parts) < 2 {
+			continue
+		}
+		payloadType := strings.TrimSpace(parts[0])
+		codec := normalizeScreenVideoCodecName(strings.Split(parts[1], "/")[0])
+		if codec != "" {
+			payloadCodecs[payloadType] = codec
+		}
+	}
+
+	codecs := make([]string, 0, 3)
+	seen := map[string]struct{}{}
+	for _, payloadType := range payloadOrder {
+		codec := payloadCodecs[payloadType]
+		if codec == "" || !screenVideoCodecEnabled(codec, features) || !allowed[codec] {
+			continue
+		}
+		if _, exists := seen[codec]; exists {
+			continue
+		}
+		seen[codec] = struct{}{}
+		codecs = append(codecs, codec)
+	}
+	return codecs
+}
+
+func normalizeScreenVideoCodecName(raw string) string {
+	codec := strings.ToLower(strings.TrimSpace(raw))
+	codec = strings.TrimPrefix(codec, "video/")
+	switch codec {
+	case "h264", "h.264":
+		return "h264"
+	case "h265", "h.265", "hevc":
+		return "h265"
+	case "av1":
+		return "av1"
+	default:
+		return ""
+	}
+}
+
+func screenVideoCodecEnabled(codec string, features runtimeFeatures) bool {
+	switch codec {
+	case "h264":
+		return features.H264
+	case "h265":
+		return features.H265
+	case "av1":
+		return features.AV1
+	default:
+		return false
+	}
 }
 
 func sdpOffersVideoCodec(sdp, codec string) bool {

@@ -1,5 +1,6 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('unydeskLanding', () => ({
+    locale: 'en',
     csrfToken: '',
     info: {
       name: 'UnyDesk',
@@ -14,12 +15,31 @@ document.addEventListener('alpine:init', () => {
       public_id: 'Loading…',
       token: '',
     },
+    localHostRuntime: {
+      ...(window.unydeskLocalHostBridge && window.unydeskLocalHostBridge.defaultRuntime
+        ? window.unydeskLocalHostBridge.defaultRuntime()
+        : {
+            available: false,
+            hostname: '',
+            version: '',
+            server_url: '',
+            install_id: '',
+            public_id: '',
+            access_password: '',
+            local_ui_url: '',
+            connected: false,
+            provisioned: false,
+            connection_state: '',
+            connection_note: '',
+          }),
+    },
     browserLocalIPv4: '',
     standaloneTarget: '',
-    standalonePassword: '',
-    standaloneStatus: 'No account required. Open a standalone client in a new tab.',
+    standaloneHostPassword: '',
+    standaloneStatus: 'Enter a host ID and the password currently shown on the host.',
     standaloneBusy: false,
-    standaloneRegenActive: false,
+    hostPasswordBusy: false,
+    hostClaimBusy: false,
     auth: {
       authenticated: false,
       user: null,
@@ -31,6 +51,8 @@ document.addEventListener('alpine:init', () => {
       password: '',
     },
     hosts: [],
+    localHostPollTimer: null,
+    localHostProbePromise: null,
     downloadsOpen: false,
     serviceStatusOpen: false,
     serviceStatus: {
@@ -62,31 +84,59 @@ document.addEventListener('alpine:init', () => {
     ],
 
     async boot() {
+      this.locale = window.unydeskI18n && window.unydeskI18n.getLocale ? window.unydeskI18n.getLocale() : 'en';
+      window.addEventListener('unydesk:localechange', (event) => {
+        this.locale = event.detail && event.detail.locale ? event.detail.locale : 'en';
+      });
       document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') this.closeDownloads();
         if (event.key === 'Escape') this.closeLogin();
         if (event.key === 'Escape') this.closeServiceStatus();
       });
-      await this.loadSession();
-      await this.ensureBrowserIdentity();
-      this.ensureStandalonePassword();
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          this.stopLocalHostPolling();
+          return;
+        }
+        this.startLocalHostPolling(0);
+      });
+      this.resolveDownloadChoice();
+      await Promise.allSettled([
+        this.loadSession(),
+        this.ensureBrowserIdentity(),
+        this.loadInfo(),
+      ]);
       this.applyPairedDownloads();
-      await this.loadInfo();
       this.detectBrowserLocalIPv4();
       this.resolveDownloadChoice();
+      this.startLocalHostPolling(150);
+    },
+
+    async fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
+      if (!window.AbortController) return fetch(url, options);
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timeout);
+      }
     },
 
     browserTokenStorageKey() {
       return 'unydesk.browser.token';
     },
 
-    standalonePasswordStorageKey() {
-      return 'unydesk.standalone.password';
+    tr(value) {
+      const locale = this.locale;
+      void locale;
+      if (!window.unydeskI18n || !window.unydeskI18n.t) return value;
+      return window.unydeskI18n.t(value, value);
     },
 
     async loadInfo() {
       try {
-        const response = await fetch('/api/v1/info');
+        const response = await this.fetchWithTimeout('/api/v1/info');
         this.captureCSRF(response);
         if (!response.ok) throw new Error('info fetch failed');
         this.info = await response.json();
@@ -96,7 +146,7 @@ document.addEventListener('alpine:init', () => {
 
     async loadSession() {
       try {
-        const response = await fetch('/api/v1/auth/session');
+        const response = await this.fetchWithTimeout('/api/v1/auth/session');
         this.captureCSRF(response);
         if (!response.ok) throw new Error('session fetch failed');
         const data = await response.json();
@@ -117,7 +167,7 @@ document.addEventListener('alpine:init', () => {
         token = Array.from(raw, (value) => value.toString(16).padStart(2, '0')).join('');
       }
       try {
-        const response = await fetch(`/api/v1/browser/identity?token=${encodeURIComponent(token)}`);
+        const response = await this.fetchWithTimeout(`/api/v1/browser/identity?token=${encodeURIComponent(token)}`);
         this.captureCSRF(response);
         if (!response.ok) throw new Error('browser identity fetch failed');
         const data = await response.json();
@@ -127,6 +177,59 @@ document.addEventListener('alpine:init', () => {
         }
       } catch (error) {
       }
+    },
+
+    async discoverLocalHostRuntime() {
+      if (this.localHostProbePromise) return this.localHostProbePromise;
+      this.localHostProbePromise = (async () => {
+        try {
+          const bridge = window.unydeskLocalHostBridge;
+          if (!bridge || !bridge.discover) throw new Error('local host bridge unavailable');
+          this.localHostRuntime = await bridge.discover(this.fetchWithTimeout.bind(this), this.localHostRuntime);
+          if (!`${this.standaloneHostPassword || ''}`.trim() && this.localHostRuntime.access_password) {
+            this.standaloneHostPassword = this.localHostRuntime.access_password;
+          }
+          return true;
+        } catch (_error) {
+          const bridge = window.unydeskLocalHostBridge;
+          this.localHostRuntime = bridge && bridge.defaultRuntime ? bridge.defaultRuntime() : {
+            available: false,
+            hostname: '',
+            version: '',
+            server_url: '',
+            install_id: '',
+            public_id: '',
+            access_password: '',
+            local_ui_url: '',
+            connected: false,
+            provisioned: false,
+            connection_state: '',
+            connection_note: '',
+          };
+          return false;
+        }
+      })();
+
+      try {
+        return await this.localHostProbePromise;
+      } finally {
+        this.localHostProbePromise = null;
+      }
+    },
+
+    startLocalHostPolling(delayMs = 0) {
+      if (document.hidden || this.localHostPollTimer) return;
+      this.localHostPollTimer = window.setTimeout(async () => {
+        this.localHostPollTimer = null;
+        const available = await this.discoverLocalHostRuntime();
+        this.startLocalHostPolling(available ? 3000 : 15000);
+      }, Math.max(0, Number(delayMs) || 0));
+    },
+
+    stopLocalHostPolling() {
+      if (!this.localHostPollTimer) return;
+      window.clearTimeout(this.localHostPollTimer);
+      this.localHostPollTimer = null;
     },
 
     async detectBrowserLocalIPv4() {
@@ -204,35 +307,110 @@ document.addEventListener('alpine:init', () => {
       return 0;
     },
 
-    generateStandalonePassword() {
-      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-      const size = 18;
-      if (window.crypto && window.crypto.getRandomValues) {
-        const raw = new Uint8Array(size);
-        window.crypto.getRandomValues(raw);
-        return Array.from(raw, (value) => alphabet[value % alphabet.length]).join('');
-      }
-      return Math.random().toString(36).slice(2, 20).toUpperCase();
+    displayedPublicID() {
+      return this.localHostRuntime.available && this.localHostRuntime.public_id
+        ? this.localHostRuntime.public_id
+        : this.browserIdentity.public_id;
     },
 
-    ensureStandalonePassword() {
-      const current = window.sessionStorage.getItem(this.standalonePasswordStorageKey()) || '';
-      if (current) {
-        this.standalonePassword = current;
+    hostPasswordDisplay() {
+      if (this.localHostRuntime.available) {
+        return this.localHostRuntime.access_password || 'Unavailable';
+      }
+      return 'Client not installed on this device';
+    },
+
+    hostPasswordNote() {
+      if (this.localHostRuntime.available && this.localHostRuntime.provisioned) {
+        return 'Detected locally from the installed host client.';
+      }
+      if (this.localHostRuntime.available && this.auth.authenticated) {
+        return 'Local host detected. Claim it once to bind this machine to your workspace.';
+      }
+      if (this.localHostRuntime.available) {
+        return 'Sign in to claim this local host and keep it attached to your workspace.';
+      }
+      return 'The public landing page only shows the host password when the local host client is installed on this device.';
+    },
+
+    showLocalHostClaimAction() {
+      return this.localHostRuntime.available && !this.localHostRuntime.provisioned;
+    },
+
+    localHostClaimCTA() {
+      if (this.hostClaimBusy) return 'Linking...';
+      if (this.auth.authenticated) return 'Claim local host';
+      return 'Sign in to claim';
+    },
+
+    async rotateLocalHostPassword() {
+      if (!this.localHostRuntime.available || this.hostPasswordBusy) return;
+      this.hostPasswordBusy = true;
+      try {
+        const bridge = window.unydeskLocalHostBridge;
+        if (!bridge || !bridge.rotatePassword) throw new Error('local host bridge unavailable');
+        this.localHostRuntime = await bridge.rotatePassword(this.fetchWithTimeout.bind(this), this.localHostRuntime);
+        this.standaloneHostPassword = this.localHostRuntime.access_password;
+        this.standaloneStatus = 'Host password rotated locally.';
+      } catch (_error) {
+        this.standaloneStatus = 'Unable to rotate the local host password right now.';
+      } finally {
+        this.hostPasswordBusy = false;
+      }
+    },
+
+    async claimLocalHost() {
+      if (!this.localHostRuntime.available || this.hostClaimBusy) return;
+      if (!this.auth.authenticated) {
+        this.openLogin();
         return;
       }
-      this.standalonePassword = this.generateStandalonePassword();
-      window.sessionStorage.setItem(this.standalonePasswordStorageKey(), this.standalonePassword);
-    },
+      this.hostClaimBusy = true;
+      this.standaloneStatus = 'Linking the local host to your workspace...';
+      try {
+        const csrfReady = await this.ensureCSRFToken();
+        if (!csrfReady) {
+          this.standaloneStatus = 'Security token unavailable. Refresh the page and try again.';
+          return;
+        }
+        const claimResponse = await fetch('/api/v1/bootstrap/claim', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': this.csrfToken,
+          },
+          body: JSON.stringify({
+            install_id: this.localHostRuntime.install_id,
+            public_id: this.localHostRuntime.public_id,
+            hostname: this.localHostRuntime.hostname,
+            version: this.localHostRuntime.version,
+          }),
+        });
+        this.captureCSRF(claimResponse);
+        const claimData = await claimResponse.json();
+        if (!claimResponse.ok) {
+          this.standaloneStatus = claimData.error || 'Unable to claim the local host right now.';
+          return;
+        }
 
-    regenerateStandalonePassword() {
-      this.standaloneRegenActive = true;
-      this.standalonePassword = this.generateStandalonePassword();
-      window.sessionStorage.setItem(this.standalonePasswordStorageKey(), this.standalonePassword);
-      this.standaloneStatus = 'Ephemeral client password regenerated.';
-      window.setTimeout(() => {
-        this.standaloneRegenActive = false;
-      }, 650);
+        const bridge = window.unydeskLocalHostBridge;
+        if (!bridge || !bridge.bootstrap) throw new Error('local host bridge unavailable');
+        this.localHostRuntime = await bridge.bootstrap(this.fetchWithTimeout.bind(this), this.localHostRuntime, {
+          domain: claimData.domain,
+          server_url: claimData.server_url,
+          install_id: claimData.install_id || this.localHostRuntime.install_id,
+          public_id: claimData.public_id || this.localHostRuntime.public_id,
+          credential: claimData.credential,
+          credential_type: claimData.credential_type,
+        });
+        this.standaloneStatus = 'Local host linked to your workspace.';
+        await this.discoverLocalHostRuntime();
+      } catch (_error) {
+        this.standaloneStatus = 'Unable to claim the local host right now.';
+      } finally {
+        this.hostClaimBusy = false;
+      }
     },
 
     async openStandaloneClient() {
@@ -245,15 +423,22 @@ document.addEventListener('alpine:init', () => {
         this.standaloneStatus = 'Client identity is still loading.';
         return;
       }
-      if (!this.standalonePassword) {
-        this.ensureStandalonePassword();
+      if (!`${this.standaloneHostPassword || ''}`.trim()) {
+        this.standaloneStatus = 'Enter the host password first.';
+        return;
       }
 
       this.standaloneBusy = true;
-      this.standaloneStatus = 'Preparing standalone session...';
+      this.standaloneStatus = 'Authenticating host access...';
       try {
+        const csrfReady = await this.ensureCSRFToken();
+        if (!csrfReady) {
+          this.standaloneStatus = 'Security token unavailable. Refresh the page and try again.';
+          return;
+        }
         const response = await fetch('/api/v1/standalone/session', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             'X-CSRF-Token': this.csrfToken,
@@ -261,7 +446,8 @@ document.addEventListener('alpine:init', () => {
           body: JSON.stringify({
             target,
             viewer: this.browserIdentity.public_id,
-            password: this.standalonePassword,
+            viewer_label: this.viewerLabel(),
+            password: this.standaloneHostPassword,
           }),
         });
         this.captureCSRF(response);
@@ -271,13 +457,20 @@ document.addEventListener('alpine:init', () => {
           return;
         }
 
+        const sessionID = String(data.id || data.session?.id || '').trim();
+        const viewerToken = String(data.viewer_token || '').trim();
+        if (!sessionID || !viewerToken) {
+          this.standaloneStatus = 'Unable to provision a direct host session right now.';
+          return;
+        }
+
         const url = new URL('/connect/', window.location.origin);
-        url.searchParams.set('session', data.id);
-        url.hash = new URLSearchParams({ standalone: this.standalonePassword }).toString();
+        url.searchParams.set('session', sessionID);
+        url.hash = new URLSearchParams({ standalone: viewerToken }).toString();
 
         const opened = window.open(url.toString(), '_blank', 'noopener');
         this.standaloneStatus = opened
-          ? `Standalone session ${data.id} opened in a new tab.`
+          ? `Direct session ${sessionID} opened in a new tab.`
           : 'Popup blocked. Opening standalone client in this tab instead.';
         if (!opened) {
           window.location.assign(url.toString());
@@ -287,6 +480,14 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.standaloneBusy = false;
       }
+    },
+
+    viewerLabel() {
+      const localRuntimeHostname = `${this.localHostRuntime && this.localHostRuntime.hostname ? this.localHostRuntime.hostname : ''}`.trim();
+      if (localRuntimeHostname) return localRuntimeHostname;
+      const browserHostname = `${this.browserIdentity && this.browserIdentity.hostname ? this.browserIdentity.hostname : ''}`.trim();
+      if (browserHostname) return browserHostname;
+      return '';
     },
 
     async loadHosts() {
@@ -676,11 +877,27 @@ document.addEventListener('alpine:init', () => {
       if (token) this.csrfToken = token;
     },
 
+    async ensureCSRFToken() {
+      if (`${this.csrfToken || ''}`.trim()) return true;
+      try {
+        const response = await this.fetchWithTimeout('/api/v1/auth/session');
+        this.captureCSRF(response);
+      } catch (_error) {
+      }
+      return !!`${this.csrfToken || ''}`.trim();
+    },
+
     async submitAuth() {
       this.authError = '';
       try {
+        const csrfReady = await this.ensureCSRFToken();
+        if (!csrfReady) {
+          this.authError = 'Security token unavailable. Refresh the page and try again.';
+          return;
+        }
         const response = await fetch('/api/v1/auth/login', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json',
             'X-CSRF-Token': this.csrfToken,

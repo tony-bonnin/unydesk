@@ -48,13 +48,13 @@ type runtimeFeatureWire struct {
 	PreferredVideoCodecs []string `json:"preferred_video_codecs"`
 }
 
-func fetchRuntimeConfig(serverURL string) (runtimeConfig, error) {
+func fetchRuntimeConfig(serverURL, serverCredential string) (runtimeConfig, error) {
 	endpoint := strings.TrimRight(serverURL, "/") + "/api/v1/info"
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	for key, values := range serverAuthHeaders(serverURL) {
+	for key, values := range serverAuthHeaders(serverURL, serverCredential) {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}

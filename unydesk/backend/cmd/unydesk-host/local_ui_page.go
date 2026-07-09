@@ -1,81 +1,14 @@
-//go:build windows
-
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"html/template"
-	"net"
 	"net/http"
-	"os/exec"
-	"sync"
 )
-
-var startLocalHostUIOnce sync.Once
-
-func startLocalHostUI(ctx context.Context, autoOpen bool) {
-	startLocalHostUIOnce.Do(func() {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return
-		}
-
-		baseURL := "http://" + listener.Addr().String()
-		localHostUI.setLocalUIURL(baseURL)
-
-		mux := http.NewServeMux()
-		mux.HandleFunc("/", handleLocalHostUIPage)
-		mux.HandleFunc("/api/status", handleLocalHostUIStatus)
-		mux.HandleFunc("/api/access", handleLocalHostUIAccess)
-
-		server := &http.Server{Handler: mux}
-		go func() {
-			<-ctx.Done()
-			_ = server.Shutdown(context.Background())
-		}()
-		go func() {
-			_ = server.Serve(listener)
-		}()
-
-		if autoOpen {
-			go func() {
-				_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", baseURL).Start()
-			}()
-		}
-	})
-}
-
-func handleLocalHostUIStatus(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(localHostUI.snapshot())
-}
 
 func handleLocalHostUIPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = fmt.Fprint(w, localHostUIHTML)
-}
-
-func handleLocalHostUIAccess(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload struct {
-		Enabled bool `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	setHostAccessEnabled(payload.Enabled)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(localHostUI.snapshot())
 }
 
 var localHostUIHTML = template.HTML(`<!DOCTYPE html>
@@ -389,7 +322,7 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
         <h1>Ready Presence</h1>
         <p class="lede">
           A local companion surface for the outbound Windows host. The installed binary is the <strong>Host</strong> role,
-          while your browser dashboard acts as the <strong>Client</strong> role and can initiate sessions only while host access stays enabled.
+          publishes the current access password on <strong>this machine only</strong>, and keeps the remote browser dashboard in the <strong>Client</strong> role.
         </p>
 
         <div class="stats-strip">
@@ -422,9 +355,13 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
             <p class="identity-note" id="install-note">This install identity is the central pairing key propagated into the host binary.</p>
           </div>
           <div class="identity">
-            <div class="identity-label">Server</div>
-            <div class="identity-code" id="server-url">Loading…</div>
-            <p class="identity-note" id="heartbeat-note">Waiting for the first heartbeat.</p>
+            <div class="identity-label">Session Password</div>
+            <div class="identity-code" id="access-password">Loading…</div>
+            <p class="identity-note" id="heartbeat-note">Generated locally and shared only from this host browser.</p>
+            <div class="btn-row">
+              <button class="btn btn-secondary" id="copy-password" type="button">Copy password</button>
+              <button class="btn btn-secondary" id="rotate-password" type="button">Generate new password</button>
+            </div>
           </div>
         </div>
       </div>
@@ -445,14 +382,42 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
             <div class="code" id="host-profile">—</div>
           </div>
           <div class="panel-row">
+            <span class="panel-row-label">Server Route</span>
+            <div class="code" id="server-url">—</div>
+          </div>
+          <div class="panel-row">
             <span class="panel-row-label">Last session</span>
             <div class="code" id="last-session">No session dispatched yet.</div>
           </div>
-          <div class="panel-row">
-            <span class="panel-row-label">Last error</span>
-            <div class="support" id="last-error">No runtime error reported.</div>
-          </div>
+        <div class="panel-row">
+          <span class="panel-row-label">Last error</span>
+          <div class="support" id="last-error">No runtime error reported.</div>
         </div>
+      </div>
+
+      <div class="panel-head" id="provision-panel" style="margin-top:18px;">
+        <strong>Provision Host</strong>
+        <p>Sign in once to store a local provisioning token instead of keeping your account password inside the host.</p>
+      </div>
+
+      <div class="panel-grid" id="provision-fields" style="margin-bottom:14px;">
+        <label class="field">
+          <span class="panel-row-label">Account email</span>
+          <input class="auth-input" id="provision-email" type="email" autocomplete="username email" placeholder="admin@example.com">
+        </label>
+        <label class="field">
+          <span class="panel-row-label">Account password</span>
+          <div class="password-wrap">
+            <input class="auth-input" id="provision-password" type="password" autocomplete="current-password" placeholder="Current account password">
+            <button class="btn btn-secondary password-eye" id="toggle-provision-password" type="button" aria-label="Show password" title="Show password">Eye</button>
+          </div>
+        </label>
+      </div>
+
+      <div class="btn-row" style="margin-bottom:8px;">
+        <button class="btn btn-primary" id="provision-submit" type="button">Sign in and provision</button>
+      </div>
+      <div class="support" id="provision-status">Provisioning stores a bearer token locally and avoids persisting the account password.</div>
 
         <div class="btn-row">
           <a class="btn btn-primary" id="account-link" href="#" target="_blank" rel="noopener">Open account</a>
@@ -464,7 +429,7 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
 
     <footer class="footer">
       <span>Host role runs locally. Client role lives in the browser dashboard.</span>
-      <span>Same install identity, same host pairing, same browser-first model.</span>
+      <span>Same install identity, same password surfaced locally, same lightweight broker model.</span>
     </footer>
   </main>
 
@@ -483,6 +448,7 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
 
     function applyStatus(status) {
       setText('public-id', status.public_id || 'Unavailable');
+      setText('access-password', status.access_password || 'Unavailable');
       setText('role-name', status.role || 'Host');
       setText('access-state', status.access_state || (status.access_enabled ? 'Enabled' : 'Paused'));
       setText('admin-state', status.admin ? 'Administrator' : 'Standard user');
@@ -491,8 +457,8 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
       setText('server-url', status.server_url || 'Unavailable');
       setText('connection-note', status.connection_note || 'No detail available.');
       setText('heartbeat-note', status.last_heartbeat_at
-        ? 'Last heartbeat: ' + new Date(status.last_heartbeat_at).toLocaleString()
-        : 'Waiting for the first heartbeat.');
+        ? 'Last heartbeat: ' + new Date(status.last_heartbeat_at).toLocaleString() + ' · Share this password only with the intended client.'
+        : 'Generated locally and shared only from this host browser.');
       setText('host-id', status.host_id || 'Waiting for registration');
       setText('host-profile', (status.hostname || 'unknown-host') + ' · ' + (status.version || '—'));
       setText('last-session', status.last_session_id
@@ -503,7 +469,25 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
         ? (status.access_enabled
             ? 'This install identity is active and currently exposed as a live Host role for Client sessions.'
             : 'This install identity is active, but the Host role is paused for new Client sessions.')
-        : 'This install identity stays stable even before the host reconnects.');
+        : (status.provisioned
+            ? 'This install identity is provisioned locally and waiting to reconnect.'
+            : 'This install identity stays stable even before the host reconnects.'));
+
+      const provisionPanel = document.getElementById('provision-panel');
+      const provisionFields = document.getElementById('provision-fields');
+      const provisionSubmit = document.getElementById('provision-submit');
+      const provisionStatus = document.getElementById('provision-status');
+      const showProvisioning = !!status.server_url && !status.provisioned;
+      if (provisionPanel) provisionPanel.style.display = showProvisioning ? '' : 'none';
+      if (provisionFields) provisionFields.style.display = showProvisioning ? '' : 'none';
+      if (provisionSubmit) provisionSubmit.style.display = showProvisioning ? '' : 'none';
+      if (provisionStatus && !showProvisioning) {
+        provisionStatus.textContent = 'Bootstrap token already loaded locally. This host can wait silently for remote access requests.';
+        provisionStatus.style.color = '#1f7a38';
+      }
+      if (provisionStatus) {
+        provisionStatus.style.display = showProvisioning ? '' : '';
+      }
 
       const accountLink = document.getElementById('account-link');
       if (accountLink && status.account_url) {
@@ -532,10 +516,57 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
       return response.json();
     }
 
+    async function rotatePassword() {
+      const response = await fetch('/api/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!response.ok) throw new Error('password rotate failed');
+      return response.json();
+    }
+
+    async function provisionHost(email, password) {
+      const response = await fetch('/api/provision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || 'Host provisioning failed');
+      }
+      return response.json();
+    }
+
+    async function copyPassword() {
+      const text = (document.getElementById('access-password')?.textContent || '').trim();
+      if (!text || text === 'Unavailable' || text === 'Loading…') return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const input = document.createElement('textarea');
+      input.value = text;
+      input.setAttribute('readonly', '');
+      input.style.position = 'absolute';
+      input.style.left = '-9999px';
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      document.body.removeChild(input);
+    }
+
     async function refresh() {
       try {
         applyStatus(await loadStatus());
       } catch (_error) {}
+    }
+
+    function setProvisionStatus(message, ok) {
+      const node = document.getElementById('provision-status');
+      if (!node) return;
+      node.textContent = message;
+      node.style.color = ok ? '#1f7a38' : '';
     }
 
     document.getElementById('access-toggle').addEventListener('click', async (event) => {
@@ -545,6 +576,62 @@ var localHostUIHTML = template.HTML(`<!DOCTYPE html>
       try {
         applyStatus(await setAccessEnabled(enabled));
       } catch (_error) {
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.getElementById('copy-password').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await copyPassword();
+      } catch (_error) {
+      } finally {
+        window.setTimeout(() => {
+          button.disabled = false;
+        }, 180);
+      }
+    });
+
+    document.getElementById('rotate-password').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        applyStatus(await rotatePassword());
+      } catch (_error) {
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    document.getElementById('toggle-provision-password').addEventListener('click', () => {
+      const input = document.getElementById('provision-password');
+      const button = document.getElementById('toggle-provision-password');
+      if (!input || !button) return;
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      button.textContent = show ? 'Hide' : 'Eye';
+      button.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      button.setAttribute('title', show ? 'Hide password' : 'Show password');
+    });
+
+    document.getElementById('provision-submit').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const email = (document.getElementById('provision-email')?.value || '').trim();
+      const password = (document.getElementById('provision-password')?.value || '').trim();
+      if (!email || !password) {
+        setProvisionStatus('Enter the account email and password first.', false);
+        return;
+      }
+      button.disabled = true;
+      setProvisionStatus('Provisioning host access...', false);
+      try {
+        applyStatus(await provisionHost(email, password));
+        document.getElementById('provision-password').value = '';
+        setProvisionStatus('Provisioning token stored locally. The host can now connect without persisting the account password.', true);
+      } catch (error) {
+        setProvisionStatus((error && error.message) || 'Host provisioning failed.', false);
       } finally {
         button.disabled = false;
       }

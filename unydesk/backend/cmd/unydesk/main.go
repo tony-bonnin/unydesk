@@ -24,6 +24,10 @@ func main() {
 	}
 
 	store := remote.NewMemoryStore()
+	if err := store.ConfigurePersistence(cfg.Paths.HostsFile, cfg.Paths.TrustedHostsFile); err != nil {
+		logger.Error("remote store init failed", "err", err)
+		os.Exit(1)
+	}
 	authStore, err := auth.NewStore(cfg.Paths.UsersFile)
 	if err != nil {
 		logger.Error("auth store init failed", "err", err)
@@ -37,7 +41,13 @@ func main() {
 		}
 	}()
 
-	logger.Info("unydesk listening", "addr", cfg.ListenAddr, "name", cfg.Name, "version", config.Version)
+	logger.Info("unydesk listening",
+		"addr", srv.Addr(),
+		"http3_enabled", srv.NativeHTTP3Enabled(),
+		"http3_addr", srv.HTTP3Addr(),
+		"name", cfg.Name,
+		"version", config.Version,
+	)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

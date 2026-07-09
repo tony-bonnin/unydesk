@@ -1,7 +1,37 @@
+import {
+  escapeHTML,
+  formatDateTime,
+  hostAvailabilityLine,
+  hostOSIcon,
+  hostPlatformLabel,
+  hostReadyForSession,
+  hostRoleLabel,
+  hostStatusClass,
+  hostStatusLabel,
+  relativeTime,
+  userInitials,
+} from "/account/shared.js";
+
 (async () => {
   const state = {
     csrfToken: '',
     browserIdentity: null,
+    localHostRuntime: window.unydeskLocalHostBridge && window.unydeskLocalHostBridge.defaultRuntime
+      ? window.unydeskLocalHostBridge.defaultRuntime()
+      : {
+          available: false,
+          hostname: '',
+          version: '',
+          server_url: '',
+          install_id: '',
+          public_id: '',
+          access_password: '',
+          local_ui_url: '',
+          connected: false,
+          provisioned: false,
+          connection_state: '',
+          connection_note: '',
+        },
     user: null,
     hosts: [],
     sessions: [],
@@ -9,28 +39,31 @@
     mobileMenuOpen: false,
     settingsModalOpen: false,
     sessionModalOpen: false,
+    approvalWaitModalOpen: false,
     currentSessionID: '',
     sessionPollTimer: null,
+    localHostPollTimer: null,
+    localHostLastClaimAt: 0,
     sessionPollInFlight: false,
-    viewerPeerConnection: null,
-    viewerDataChannel: null,
-    viewerTransportState: 'Idle',
+    viewerTransportState: 'Dedicated control page',
     viewerTransportLog: [],
-    remoteCandidatesSeen: [],
-    iceServers: [],
-    runtimeInfoLoaded: false,
+    lastSessionLogKey: '',
     creatingSession: false,
     settingsTab: 'profile',
     preferences: {
       theme: 'system',
       defaultSection: 'overview',
     },
+    localHostProbePromise: null,
+    localHostClaimPromise: null,
+    approvalWaitSessionID: '',
+    approvalWaitTarget: '',
   };
 
   const sectionTitles = {
     overview: 'Overview',
-    connections: 'New Connection',
-    hosts: 'Hosts',
+    connections: 'Connect',
+    hosts: 'Machines',
     sessions: 'Sessions',
   };
   const sessionsCollectionURL = '/api/v1/sessions/';
@@ -64,15 +97,25 @@
   const settingsModalNameEl = document.getElementById('settings-modal-name');
   const settingsModalEmailEl = document.getElementById('settings-modal-email');
   const settingsModalAvatarEl = document.getElementById('settings-modal-avatar');
+  const approvalWaitBackdropEl = document.getElementById('approval-wait-backdrop');
+  const approvalWaitCloseEl = document.getElementById('approval-wait-close');
+  const approvalWaitTitleEl = document.getElementById('approval-wait-title');
+  const approvalWaitSubtitleEl = document.getElementById('approval-wait-subtitle');
+  const approvalWaitMessageEl = document.getElementById('approval-wait-message');
+  const approvalWaitTargetEl = document.getElementById('approval-wait-target');
+  const approvalWaitSessionEl = document.getElementById('approval-wait-session');
+  const approvalWaitFeedbackWrapEl = document.getElementById('approval-wait-feedback-wrap');
+  const approvalWaitFeedbackEl = document.getElementById('approval-wait-feedback');
+  const approvalWaitRepromptBtn = document.getElementById('approval-wait-reprompt-btn');
+  const approvalWaitDismissBtn = document.getElementById('approval-wait-dismiss-btn');
   const sessionModalBackdropEl = document.getElementById('session-modal-backdrop');
   const sessionModalCloseEl = document.getElementById('session-modal-close');
   const sessionModalTitleEl = document.getElementById('session-modal-title');
   const sessionModalSubtitleEl = document.getElementById('session-modal-subtitle');
   const sessionRefreshBtn = document.getElementById('session-refresh-btn');
+  const sessionRepromptBtn = document.getElementById('session-reprompt-btn');
   const sessionCloseBtn = document.getElementById('session-close-btn');
-  const sessionStartSignalingBtn = document.getElementById('session-start-signaling-btn');
-  const sessionSendPingBtn = document.getElementById('session-send-ping-btn');
-  const sessionRemotePadEl = document.getElementById('session-remote-pad');
+  const sessionOpenControlBtn = document.getElementById('session-open-control-btn');
   const sessionDetailIDEl = document.getElementById('session-detail-id');
   const sessionDetailStatusEl = document.getElementById('session-detail-status');
   const sessionDetailTargetEl = document.getElementById('session-detail-target');
@@ -91,13 +134,16 @@
   const sessionOfferPreviewEl = document.getElementById('session-offer-preview');
   const sessionAnswerPreviewEl = document.getElementById('session-answer-preview');
   const sessionTransportLogEl = document.getElementById('session-transport-log');
+  const sessionLogToggleEl = document.getElementById('session-log-toggle');
+  const sessionLogBodyEl = document.getElementById('session-log-body');
   const settingsTabButtons = Array.from(document.querySelectorAll('.settings-modal-tab'));
   const settingsPanels = Array.from(document.querySelectorAll('.settings-tab-panel'));
   const overviewHostsGridEl = document.getElementById('overview-hosts-grid');
   const hostsTableBody = document.getElementById('hosts-table-body');
   const sessionsTableBody = document.getElementById('sessions-table-body');
   const sessionTargetEl = document.getElementById('session-target');
-  const sessionViewerEl = document.getElementById('session-viewer');
+  const sessionPasswordEl = document.getElementById('session-password');
+  const sessionConnectStatusEl = document.getElementById('session-connect-status');
   const sessionCreateBtn = document.getElementById('session-create-btn');
   const profileAvatarEl = document.getElementById('profile-avatar');
   const profileDisplayNameEl = document.getElementById('profile-display-name');
@@ -126,13 +172,71 @@
     return `/account/control/?session=${encodeURIComponent(sessionID)}`;
   }
 
+  function t(value, fallback = value, params) {
+    if (window.unydeskI18n && typeof window.unydeskI18n.t === 'function') {
+      return window.unydeskI18n.t(value, fallback, params);
+    }
+    return fallback;
+  }
+
+  function translateFragment(root) {
+    if (!root) return;
+    if (window.unydeskI18n && typeof window.unydeskI18n.apply === 'function') {
+      window.unydeskI18n.apply(root);
+    }
+  }
+
   function openSessionTab(sessionID) {
     if (!sessionID) return;
     const url = sessionControlURL(sessionID);
-    const opened = window.open(url, '_blank', 'noopener');
+    const target = `unydesk-control-${sessionID.replace(/[^a-z0-9_-]/gi, '')}`;
+    const opened = window.open(url, target);
     if (!opened) {
       window.location.assign(url);
+      return;
     }
+    opened.focus();
+  }
+
+  function sessionApprovalReady(session) {
+    if (!session) return false;
+    return session.status === 'active' || session.dispatch_state === 'accepted';
+  }
+
+  function sessionApprovalRejected(session) {
+    if (!session) return false;
+    return session.status === 'closed' || session.dispatch_state === 'rejected';
+  }
+
+  function sessionAwaitingApproval(session) {
+    if (!session) return false;
+    return !sessionApprovalReady(session) && !sessionApprovalRejected(session);
+  }
+
+  function beginApprovalWait(sessionID, target = '', message = '') {
+    state.approvalWaitSessionID = String(sessionID || '').trim();
+    state.approvalWaitTarget = String(target || '').trim();
+    setCurrentSection('overview');
+    return openApprovalWaitModal(state.approvalWaitSessionID, state.approvalWaitTarget, message || t('Waiting for host approval.'));
+  }
+
+  function clearApprovalWait(sessionID = '') {
+    const current = String(state.approvalWaitSessionID || '').trim();
+    const target = String(sessionID || '').trim();
+    if (!target || current === target) {
+      state.approvalWaitSessionID = '';
+      state.approvalWaitTarget = '';
+    }
+  }
+
+  function setApprovalWaitFeedback(kind, message) {
+    setFeedback(approvalWaitFeedbackEl, kind, message);
+    if (approvalWaitFeedbackWrapEl) approvalWaitFeedbackWrapEl.classList.remove('hidden');
+  }
+
+  function clearApprovalWaitFeedback() {
+    clearFeedback(approvalWaitFeedbackEl);
+    if (approvalWaitFeedbackWrapEl) approvalWaitFeedbackWrapEl.classList.add('hidden');
   }
 
   function captureCSRF(response) {
@@ -156,6 +260,17 @@
     params.set('token', token);
 
     return `/api/v1/browser/identity?${params.toString()}`;
+  }
+
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 4500) {
+    if (!window.AbortController) return fetch(url, options);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }
 
   function setFeedback(target, kind, message) {
@@ -205,118 +320,6 @@
     if (sessionFeedbackWrapEl) sessionFeedbackWrapEl.classList.add('hidden');
   }
 
-  function formatDateTime(value) {
-    if (!value) return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleString();
-  }
-
-  function relativeTime(value) {
-    if (!value) return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return '—';
-    const diff = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
-    if (diff < 60) return `${diff}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
-
-  function escapeHTML(value) {
-    return String(value)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-
-  function hostOSIcon(host) {
-    const osName = String(host && host.os ? host.os : '').toLowerCase();
-    if (osName.includes('windows')) return 'fa-brands fa-windows';
-    if (osName.includes('darwin') || osName.includes('mac') || osName.includes('osx')) return 'fa-brands fa-apple';
-    if (osName.includes('linux') || osName.includes('alpine')) return 'fa-brands fa-linux';
-    return 'fa-solid fa-desktop';
-  }
-
-  function hostPlatformLabel(host) {
-    const os = hostOSLabel(host && host.os);
-    const arch = hostArchLabel(host && host.arch);
-    if (os === '?' && arch === '?') return '?';
-    if (os === '?') return arch;
-    if (arch === '?') return os;
-    return `${os} ${arch}`;
-  }
-
-  function hostOSLabel(value) {
-    const raw = String(value || '').trim();
-    const osName = raw.toLowerCase();
-    if (!osName) return '?';
-    const linuxDistro = linuxDistributionLabel(osName);
-    if (linuxDistro) return linuxDistro;
-    if (osName.includes('windows')) return 'Windows';
-    if (osName.includes('darwin') || osName.includes('mac') || osName.includes('osx')) return 'macOS';
-    if (osName.includes('linux')) return 'Linux';
-    return raw;
-  }
-
-  function linuxDistributionLabel(source) {
-    const distributions = [
-      [/ubuntu/, 'Ubuntu Linux'],
-      [/debian/, 'Debian Linux'],
-      [/fedora/, 'Fedora Linux'],
-      [/\brhel\b/, 'Red Hat Enterprise Linux'],
-      [/red\s*hat/, 'Red Hat Enterprise Linux'],
-      [/centos/, 'CentOS Linux'],
-      [/rocky/, 'Rocky Linux'],
-      [/almalinux/, 'AlmaLinux'],
-      [/opensuse/, 'openSUSE Linux'],
-      [/\bsuse\b/, 'SUSE Linux'],
-      [/\barch\b/, 'Arch Linux'],
-      [/manjaro/, 'Manjaro Linux'],
-      [/alpine/, 'Alpine Linux'],
-      [/gentoo/, 'Gentoo Linux'],
-      [/linux\s*mint/, 'Linux Mint'],
-      [/\bmint\b/, 'Linux Mint'],
-      [/pop[!_\s-]*os/, 'Pop!_OS'],
-    ];
-    const match = distributions.find(([pattern]) => pattern.test(source));
-    return match ? match[1] : '';
-  }
-
-  function hostArchLabel(value) {
-    const arch = String(value || '').trim().toLowerCase();
-    if (!arch) return '?';
-    if (['amd64', 'x86_64', 'x64'].includes(arch)) return '64-bits';
-    if (['386', 'i386', 'i686', 'x86'].includes(arch)) return '32-bits';
-    if (['arm64', 'aarch64'].includes(arch)) return 'ARM64';
-    return value;
-  }
-
-  function hostRoleLabel(host) {
-    return String(host && host.role ? host.role : 'host').trim().toLowerCase() === 'client' ? 'Client' : 'Host';
-  }
-
-  function hostStatusClass(host) {
-    const status = String(host && host.status ? host.status : '').trim().toLowerCase();
-    if (status === 'online') return 'is-online';
-    if (status === 'paused') return 'is-paused';
-    return 'is-offline';
-  }
-
-  function userInitials(user) {
-    const avatar = user && typeof user.avatar === 'string' ? user.avatar.trim() : '';
-    if (avatar) return avatar.slice(0, 2).toUpperCase();
-    const source = (user && (user.display_name || user.email)) || 'UnyDesk';
-    return source
-      .split(/[\s@._-]+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0].toUpperCase())
-      .join('') || 'U';
-  }
-
   function setCurrentSection(section) {
     state.currentSection = sectionTitles[section] ? section : state.preferences.defaultSection || 'overview';
     workspaceTitleEl.textContent = sectionTitles[state.currentSection];
@@ -357,10 +360,61 @@
     }
   }
 
+  function sessionOverlayOpen() {
+    return state.sessionModalOpen || state.approvalWaitModalOpen;
+  }
+
+  async function openApprovalWaitModal(sessionID, target = '', message = '') {
+    if (!sessionID) return;
+    state.currentSessionID = sessionID;
+    clearApprovalWaitFeedback();
+    approvalWaitTitleEl.textContent = t('Waiting for approval');
+    approvalWaitSubtitleEl.textContent = t('The host must authorize this connection before live control opens.');
+    approvalWaitMessageEl.textContent = message || t('Keep this window open while the host decides, or relaunch the request if the host popup was closed.');
+    approvalWaitTargetEl.textContent = target || '—';
+    approvalWaitSessionEl.textContent = sessionID || '—';
+    approvalWaitBackdropEl.classList.add('open');
+    state.approvalWaitModalOpen = true;
+    document.body.classList.add('account-menu-open');
+    startSessionPolling();
+    try {
+      const session = await fetchSession(sessionID);
+      if (sessionApprovalReady(session)) {
+        clearApprovalWait(sessionID);
+        closeApprovalWaitModal({ preserveTracking: false });
+        openSessionTab(sessionID);
+        return;
+      }
+      if (sessionApprovalRejected(session)) {
+        setApprovalWaitFeedback('error', t('Host approval was refused or the request expired.'));
+      }
+    } catch (_error) {
+      setApprovalWaitFeedback('error', t('Unable to load session details right now.'));
+    }
+  }
+
+  function closeApprovalWaitModal(options = {}) {
+    approvalWaitBackdropEl.classList.remove('open');
+    state.approvalWaitModalOpen = false;
+    clearApprovalWaitFeedback();
+    if (!options.preserveTracking) {
+      clearApprovalWait(state.currentSessionID);
+      if (!state.sessionModalOpen) {
+        state.currentSessionID = '';
+      }
+    }
+    if (!sessionOverlayOpen() && !state.mobileMenuOpen && !state.settingsModalOpen) {
+      document.body.classList.remove('account-menu-open');
+    }
+    if (!sessionOverlayOpen()) {
+      stopSessionPolling();
+    }
+  }
+
   function startSessionPolling() {
     stopSessionPolling();
     state.sessionPollTimer = window.setInterval(async () => {
-      if (!state.currentSessionID || !state.sessionModalOpen || document.hidden || state.sessionPollInFlight) return;
+      if (!state.currentSessionID || !sessionOverlayOpen() || document.hidden || state.sessionPollInFlight) return;
       state.sessionPollInFlight = true;
       try {
         await refreshSessionDetails(false);
@@ -382,92 +436,28 @@
     const stamp = new Date().toLocaleTimeString();
     state.viewerTransportLog.push(`[${stamp}] ${message}`);
     state.viewerTransportLog = state.viewerTransportLog.slice(-40);
+    renderTransportLog();
+  }
+
+  function renderTransportLog() {
+    if (!sessionTransportLogEl) return;
+    const enabled = !sessionLogToggleEl || sessionLogToggleEl.checked;
+    if (sessionLogBodyEl) sessionLogBodyEl.classList.toggle('hidden', !enabled);
+    if (!enabled) return;
     sessionTransportLogEl.value = state.viewerTransportLog.join('\n');
     sessionTransportLogEl.scrollTop = sessionTransportLogEl.scrollHeight;
   }
 
-  function normalizeIceServerURLs(urls) {
-    if (typeof urls === 'string') {
-      const value = urls.trim();
-      return value ? [value] : [];
-    }
-    if (!Array.isArray(urls)) return [];
-    const seen = new Set();
-    const normalized = [];
-    urls.forEach((url) => {
-      const value = String(url || '').trim();
-      if (!value || seen.has(value)) return;
-      seen.add(value);
-      normalized.push(value);
-    });
-    return normalized;
-  }
-
-  function normalizeIceServers(servers) {
-    if (!Array.isArray(servers)) return [];
-    return servers.map((server) => {
-      const urls = normalizeIceServerURLs(server && server.urls);
-      if (urls.length === 0) return null;
-      const normalized = { urls };
-      const username = String((server && server.username) || '').trim();
-      const credential = String((server && server.credential) || '').trim();
-      const credentialType = String((server && (server.credentialType || server.credential_type)) || '').trim();
-      if (username) normalized.username = username;
-      if (credential) normalized.credential = credential;
-      if (credentialType) normalized.credentialType = credentialType;
-      return normalized;
-    }).filter(Boolean);
-  }
-
-  function describeIceServers(servers) {
-    if (!servers || servers.length === 0) {
-      return 'ICE servers not configured; direct host candidates only';
-    }
-    let stunURLs = 0;
-    let turnURLs = 0;
-    servers.forEach((server) => {
-      normalizeIceServerURLs(server.urls).forEach((url) => {
-        const value = url.toLowerCase();
-        if (value.startsWith('turn:') || value.startsWith('turns:')) turnURLs += 1;
-        if (value.startsWith('stun:') || value.startsWith('stuns:')) stunURLs += 1;
-      });
-    });
-    return `ICE servers configured: ${servers.length} server(s), ${turnURLs} TURN URL(s), ${stunURLs} STUN URL(s)`;
-  }
-
-  async function loadRuntimeInfo() {
-    try {
-      const response = await fetch('/api/v1/info');
-      captureCSRF(response);
-      if (!response.ok) throw new Error(`runtime info failed (${response.status})`);
-      const data = await response.json();
-      const servers = data.ice_servers || (data.webrtc && data.webrtc.ice_servers) || [];
-      state.iceServers = normalizeIceServers(servers);
-      state.runtimeInfoLoaded = true;
-    } catch (_error) {
-      state.iceServers = [];
-      state.runtimeInfoLoaded = false;
-    }
-  }
-
   function resetViewerTransport() {
-    if (state.viewerDataChannel) {
-      try { state.viewerDataChannel.close(); } catch (_error) {}
-    }
-    if (state.viewerPeerConnection) {
-      try { state.viewerPeerConnection.close(); } catch (_error) {}
-    }
-    state.viewerPeerConnection = null;
-    state.viewerDataChannel = null;
-    state.viewerTransportState = 'Idle';
+    state.viewerTransportState = 'Dedicated control page';
     state.viewerTransportLog = [];
-    sessionTransportLogEl.value = '';
-    state.remoteCandidatesSeen = [];
-    sessionSendPingBtn.disabled = true;
+    renderTransportLog();
   }
 
   function renderSessionDetails(session) {
     if (!session) return;
+    const ready = sessionApprovalReady(session);
+    const waiting = sessionAwaitingApproval(session);
     sessionModalTitleEl.textContent = `Session Control · ${session.id || '—'}`;
     sessionModalSubtitleEl.textContent = `Target ${session.target || '—'} · Viewer ${session.viewer || '—'}`;
     sessionDetailIDEl.textContent = session.id || '—';
@@ -488,203 +478,10 @@
     sessionOfferPreviewEl.value = session.offer_sdp || '';
     sessionAnswerPreviewEl.value = session.answer_sdp || '';
     sessionCloseBtn.disabled = session.status === 'closed';
-  }
-
-  function sendViewerControlMessage(payload) {
-    if (!state.viewerDataChannel || state.viewerDataChannel.readyState !== 'open') {
-      setSessionFeedback('error', 'Viewer data channel is not open yet.');
-      return;
-    }
-    state.viewerDataChannel.send(JSON.stringify(payload));
-    appendTransportLog(`sent ${payload.type}`);
-  }
-
-  function bindRemotePad() {
-    if (!sessionRemotePadEl) return;
-
-    sessionRemotePadEl.addEventListener('mouseenter', () => {
-      sessionRemotePadEl.focus();
-    });
-
-    sessionRemotePadEl.addEventListener('mousemove', (event) => {
-      const rect = sessionRemotePadEl.getBoundingClientRect();
-      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
-      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
-      sendViewerControlMessage({
-        type: 'mouse_move',
-        session_id: state.currentSessionID,
-        x: Number(x.toFixed(4)),
-        y: Number(y.toFixed(4)),
-      });
-    });
-
-    sessionRemotePadEl.addEventListener('click', (event) => {
-      const rect = sessionRemotePadEl.getBoundingClientRect();
-      const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
-      const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)));
-      sendViewerControlMessage({
-        type: 'mouse_click',
-        session_id: state.currentSessionID,
-        button: event.button,
-        x: Number(x.toFixed(4)),
-        y: Number(y.toFixed(4)),
-      });
-    });
-
-    sessionRemotePadEl.addEventListener('keydown', (event) => {
-      if (event.repeat) return;
-      sendViewerControlMessage({
-        type: 'key_down',
-        session_id: state.currentSessionID,
-        key: event.key,
-        code: event.code,
-      });
-      event.preventDefault();
-    });
-
-    sessionRemotePadEl.addEventListener('keyup', (event) => {
-      sendViewerControlMessage({
-        type: 'key_up',
-        session_id: state.currentSessionID,
-        key: event.key,
-        code: event.code,
-      });
-      event.preventDefault();
-    });
-  }
-
-  async function postSessionCandidate(sessionID, candidate) {
-    const response = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionID)}/candidates`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': state.csrfToken,
-      },
-      body: JSON.stringify({ candidate, source: 'viewer' }),
-    });
-    captureCSRF(response);
-    if (!response.ok) throw new Error('candidate post failed');
-  }
-
-  async function postSessionOffer(sessionID, sdp) {
-    const response = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionID)}/offer`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': state.csrfToken,
-      },
-      body: JSON.stringify({ sdp }),
-    });
-    captureCSRF(response);
-    if (!response.ok) throw new Error('offer post failed');
-    return response.json();
-  }
-
-  async function applyRemoteAnswerIfPresent(session) {
-    if (!state.viewerPeerConnection || !session || !session.answer_sdp) return;
-    const pc = state.viewerPeerConnection;
-    if (pc.remoteDescription && pc.remoteDescription.type === 'answer') return;
-    await pc.setRemoteDescription({ type: 'answer', sdp: session.answer_sdp });
-    state.viewerTransportState = 'Answer applied';
-    appendTransportLog('remote answer applied');
-  }
-
-  async function applyRemoteCandidatesIfPresent(session) {
-    if (!state.viewerPeerConnection || !session || !Array.isArray(session.host_ice_candidates)) return;
-    for (const candidate of session.host_ice_candidates) {
-      if (!candidate || state.remoteCandidatesSeen.includes(candidate)) continue;
-      state.remoteCandidatesSeen.push(candidate);
-      try {
-        await state.viewerPeerConnection.addIceCandidate({ candidate });
-      } catch (_error) {}
-    }
-  }
-
-  async function startViewerSignaling() {
-    if (!state.currentSessionID) return;
-    if (!window.RTCPeerConnection) {
-      setSessionFeedback('error', 'WebRTC is not available in this browser.');
-      return;
-    }
-    resetViewerTransport();
-    clearSessionFeedback();
-    sessionStartSignalingBtn.disabled = true;
-    try {
-      if (!state.runtimeInfoLoaded) await loadRuntimeInfo();
-      appendTransportLog(describeIceServers(state.iceServers));
-      const peerConfig = {
-        iceServers: state.iceServers,
-        iceCandidatePoolSize: state.iceServers.length > 0 ? 2 : 1,
-      };
-      const pc = new RTCPeerConnection(peerConfig);
-      state.viewerPeerConnection = pc;
-      state.viewerTransportState = 'Starting';
-      renderSessionDetails(await fetchSession(state.currentSessionID));
-
-      const dc = pc.createDataChannel('unydesk-control');
-      state.viewerDataChannel = dc;
-      sessionSendPingBtn.disabled = true;
-
-      dc.onopen = () => {
-        state.viewerTransportState = 'Data channel open';
-        sessionSendPingBtn.disabled = false;
-        appendTransportLog('data channel open');
-        sendViewerControlMessage({
-          type: 'hello',
-          viewer: state.browserIdentity ? state.browserIdentity.public_id : '',
-          session_id: state.currentSessionID,
-        });
-        sendViewerControlMessage({
-          type: 'ping',
-          session_id: state.currentSessionID,
-          sent_at: new Date().toISOString(),
-        });
-        void refreshSessionDetails(false);
-      };
-      dc.onclose = () => {
-        state.viewerTransportState = 'Data channel closed';
-        sessionSendPingBtn.disabled = true;
-        appendTransportLog('data channel closed');
-        void refreshSessionDetails(false);
-      };
-      dc.onmessage = (event) => {
-        let label = 'message';
-        try {
-          const data = JSON.parse(String(event.data || '{}'));
-          label = data.type || label;
-        } catch (_error) {}
-        appendTransportLog(`received ${label}`);
-      };
-
-      pc.onconnectionstatechange = () => {
-        state.viewerTransportState = `Peer ${pc.connectionState}`;
-        appendTransportLog(`peer ${pc.connectionState}`);
-        void refreshSessionDetails(false);
-      };
-
-      pc.onicecandidate = (event) => {
-        if (!event.candidate || !state.currentSessionID) return;
-        appendTransportLog('viewer ICE candidate gathered');
-        void postSessionCandidate(state.currentSessionID, event.candidate.candidate).catch(() => {});
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      state.viewerTransportState = 'Offer created';
-      const updatedSession = await postSessionOffer(state.currentSessionID, offer.sdp || '');
-      renderSessionDetails(updatedSession);
-      await applyRemoteAnswerIfPresent(updatedSession);
-      await applyRemoteCandidatesIfPresent(updatedSession);
-      setSessionFeedback('success', 'Viewer offer published. Waiting for host answer.');
-    } catch (_error) {
-      resetViewerTransport();
-      setSessionFeedback('error', 'Unable to start viewer signaling.');
-    } finally {
-      sessionStartSignalingBtn.disabled = false;
-      try {
-        const session = await fetchSession(state.currentSessionID);
-        renderSessionDetails(session);
-      } catch (_error) {}
+    sessionOpenControlBtn.disabled = !ready;
+    if (sessionRepromptBtn) {
+      sessionRepromptBtn.disabled = !waiting;
+      sessionRepromptBtn.classList.toggle('hidden', !waiting);
     }
   }
 
@@ -698,9 +495,23 @@
   async function refreshSessionDetails(withFeedback = true) {
     if (!state.currentSessionID) return;
     const session = await fetchSession(state.currentSessionID);
-    await applyRemoteAnswerIfPresent(session);
-    await applyRemoteCandidatesIfPresent(session);
     renderSessionDetails(session);
+    if (state.approvalWaitSessionID && state.approvalWaitSessionID === String(session.id || '').trim()) {
+      if (sessionApprovalReady(session)) {
+        clearApprovalWait(session.id);
+        closeApprovalWaitModal({ preserveTracking: false });
+        openSessionTab(session.id);
+        return;
+      }
+      if (sessionApprovalRejected(session)) {
+        setApprovalWaitFeedback('error', t('Host approval was refused or the request expired.'));
+      }
+    }
+    const logKey = `${session.id || ''}:${session.status || 'unknown'}:${session.dispatch_state || 'none'}:${session.updated_at || ''}`;
+    if (logKey !== state.lastSessionLogKey) {
+      state.lastSessionLogKey = logKey;
+      appendTransportLog(`session state · status=${session.status || 'unknown'} · dispatch=${session.dispatch_state || 'none'}`);
+    }
     if (withFeedback) {
       clearSessionFeedback();
     }
@@ -709,12 +520,15 @@
   async function openSessionModal(sessionID, options = {}) {
     if (!sessionID) return;
     state.currentSessionID = sessionID;
+    state.lastSessionLogKey = '';
     clearSessionFeedback();
     sessionModalBackdropEl.classList.add('open');
     state.sessionModalOpen = true;
     document.body.classList.add('account-menu-open');
     try {
+      resetViewerTransport();
       await refreshSessionDetails(false);
+      appendTransportLog(`session opened · ${sessionID}`);
       if (options.message) setSessionFeedback('success', options.message);
       startSessionPolling();
     } catch (_error) {
@@ -723,13 +537,15 @@
   }
 
   function closeSessionModal() {
+    appendTransportLog(`session closed · ${state.currentSessionID || 'unknown'}`);
     resetViewerTransport();
+    state.lastSessionLogKey = '';
     sessionModalBackdropEl.classList.remove('open');
     state.sessionModalOpen = false;
     state.currentSessionID = '';
     stopSessionPolling();
     clearSessionFeedback();
-    if (!state.mobileMenuOpen && !state.settingsModalOpen) {
+    if (!sessionOverlayOpen() && !state.mobileMenuOpen && !state.settingsModalOpen) {
       document.body.classList.remove('account-menu-open');
     }
   }
@@ -818,9 +634,92 @@
     }
     browserIDEl.textContent = state.browserIdentity.public_id || 'Unavailable';
     browserIDEl.title = 'Reserved local client identity for this browser';
-    if (!sessionViewerEl.value) {
-      sessionViewerEl.value = state.browserIdentity.public_id || '';
+  }
+
+  async function discoverLocalHostRuntime() {
+    if (state.localHostProbePromise) return state.localHostProbePromise;
+    state.localHostProbePromise = (async () => {
+      try {
+        const bridge = window.unydeskLocalHostBridge;
+        if (!bridge || !bridge.discover) throw new Error('local host bridge unavailable');
+        state.localHostRuntime = await bridge.discover(fetchWithTimeout, state.localHostRuntime);
+        return true;
+      } catch (_error) {
+        const bridge = window.unydeskLocalHostBridge;
+        state.localHostRuntime = bridge && bridge.defaultRuntime
+          ? bridge.defaultRuntime()
+          : {
+              available: false,
+              hostname: '',
+              version: '',
+              server_url: '',
+              install_id: '',
+              public_id: '',
+              access_password: '',
+              local_ui_url: '',
+              connected: false,
+              provisioned: false,
+              connection_state: '',
+              connection_note: '',
+            };
+        return false;
+      }
+    })();
+
+    try {
+      return await state.localHostProbePromise;
+    } finally {
+      state.localHostProbePromise = null;
     }
+  }
+
+  async function claimLocalHostSilently() {
+    if (state.localHostClaimPromise) return state.localHostClaimPromise;
+    if (!state.user || !state.localHostRuntime.available) return false;
+    const now = Date.now();
+    if (state.localHostRuntime.connected) return false;
+    if (now - state.localHostLastClaimAt < 15000) return false;
+    state.localHostLastClaimAt = now;
+    state.localHostClaimPromise = (async () => {
+      try {
+        const response = await fetch('/api/v1/bootstrap/claim', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': state.csrfToken,
+          },
+          body: JSON.stringify({
+            install_id: state.localHostRuntime.install_id,
+            public_id: state.localHostRuntime.public_id,
+            hostname: state.localHostRuntime.hostname,
+            version: state.localHostRuntime.version,
+          }),
+        });
+        captureCSRF(response);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return false;
+        const bridge = window.unydeskLocalHostBridge;
+        if (!bridge || !bridge.bootstrap) return false;
+        state.localHostRuntime = await bridge.bootstrap(fetchWithTimeout, state.localHostRuntime, {
+          domain: data.domain,
+          server_url: data.server_url,
+          install_id: data.install_id || state.localHostRuntime.install_id,
+          public_id: data.public_id || state.localHostRuntime.public_id,
+          credential: data.credential,
+          credential_type: data.credential_type,
+        });
+        await discoverLocalHostRuntime();
+        if (state.localHostRuntime.provisioned) {
+          await loadHosts().catch(() => {});
+        }
+        return !!state.localHostRuntime.provisioned;
+      } catch (_error) {
+        return false;
+      } finally {
+        state.localHostClaimPromise = null;
+      }
+    })();
+    return state.localHostClaimPromise;
   }
 
   async function loadSession() {
@@ -859,24 +758,26 @@
   }
 
   async function loadHosts() {
-    const response = await fetch('/api/v1/hosts');
+    const response = await fetch('/api/v1/admin/hosts');
     captureCSRF(response);
     if (!response.ok) throw new Error('host fetch failed');
     const data = await response.json();
     state.hosts = sortHostsStable(data.hosts || []);
     renderHosts();
+    updateConnectStatus();
   }
 
   function renderHosts() {
     const hosts = sortHostsStable(state.hosts);
-    const onlineCount = hosts.filter((host) => host.status === 'online').length;
+    const readyCount = hosts.filter(hostReadyForSession).length;
     const totalCount = hosts.length;
-    hostsOnlineEl.textContent = String(onlineCount);
+    hostsOnlineEl.textContent = String(readyCount);
     hostsTotalEl.textContent = String(totalCount);
-    hostsOfflineEl.textContent = String(Math.max(0, totalCount - onlineCount));
+    hostsOfflineEl.textContent = String(Math.max(0, totalCount - readyCount));
     renderOverviewHosts(hosts);
     if (!hosts.length) {
-      hostsTableBody.innerHTML = '<tr><td colspan="5">No hosts registered yet.</td></tr>';
+      hostsTableBody.innerHTML = '<tr><td colspan="5">No registered machines yet.</td></tr>';
+      translateFragment(hostsTableBody);
       return;
     }
     hostsTableBody.innerHTML = hosts.map((host) => `
@@ -884,28 +785,40 @@
         <td class="host-table-cell">
           <div class="host-name-stack">
             <strong>${escapeHTML(host.hostname || host.name || 'unknown host')}</strong>
-            <span class="host-secondary-id">${escapeHTML(`${hostRoleLabel(host)} role`)}</span>
+            <span class="host-secondary-id">${escapeHTML(`${hostRoleLabel(host)} role · ${hostAvailabilityLine(host)}${host.trusted ? ` · ${t('trusted access')}` : ` · ${t('first access uses host password')}`}`)}</span>
           </div>
         </td>
         <td>${escapeHTML(host.public_id || '—')}</td>
         <td>${escapeHTML(hostPlatformLabel(host))}</td>
-        <td><span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span></td>
+        <td><span class="table-status ${hostStatusClass(host)}">${escapeHTML(hostStatusLabel(host))}</span></td>
         <td>
           <div class="host-table-actions">
             <button
-              class="btn btn-secondary host-control-btn"
-              type="button"
-              data-target="${escapeHTML(host.public_id || host.id || '')}"
-              ${host.status === 'online' ? '' : 'disabled'}
-            >
-              <i class="fa-solid fa-tv"></i>
-              <span>Control</span>
-            </button>
+            class="btn btn-secondary host-control-btn"
+            type="button"
+            data-target="${escapeHTML(host.public_id || host.id || '')}"
+            ${hostReadyForSession(host) ? '' : 'disabled'}
+          >
+            <i class="fa-solid fa-tv"></i>
+            <span>${hostReadyForSession(host) ? (host.trusted ? t('Connect now') : t('Authenticate once')) : t('Unavailable')}</span>
+          </button>
+          ${host.trusted ? `
+          <button
+            class="btn btn-secondary host-untrust-btn"
+            type="button"
+            data-target="${escapeHTML(host.id || host.public_id || '')}"
+          >
+            <i class="fa-solid fa-user-xmark"></i>
+            <span>${t('Forget')}</span>
+          </button>
+          ` : ''}
           </div>
         </td>
       </tr>
     `).join('');
     bindHostControlActions();
+    bindHostTrustActions();
+    translateFragment(hostsTableBody);
   }
 
   function sortHostsStable(hosts) {
@@ -935,13 +848,14 @@
   }
 
   function renderOverviewHosts(hosts = state.hosts) {
-    const onlineHosts = sortHostsStable(hosts).filter((host) => host.status === 'online');
-    if (!onlineHosts.length) {
-      overviewHostsGridEl.innerHTML = '<div class="overview-host-empty">No connected hosts right now.</div>';
+    const registeredHosts = sortHostsStable(hosts);
+    if (!registeredHosts.length) {
+      overviewHostsGridEl.innerHTML = '<div class="overview-host-empty">No registered machines yet.</div>';
+      translateFragment(overviewHostsGridEl);
       return;
     }
-    overviewHostsGridEl.innerHTML = onlineHosts.map((host) => `
-      <article class="overview-host-card">
+    overviewHostsGridEl.innerHTML = registeredHosts.map((host) => `
+      <article class="overview-host-card ${hostReadyForSession(host) ? 'is-ready' : 'is-unavailable'}">
         <div class="overview-host-card-head">
           <strong class="overview-host-title">
             <i class="${escapeHTML(hostOSIcon(host))} overview-host-os"></i>
@@ -950,24 +864,125 @@
               <span class="host-secondary-id">${escapeHTML(host.public_id || '—')}</span>
             </span>
           </strong>
-          <span class="table-status ${hostStatusClass(host)}">${escapeHTML(host.status || 'unknown')}</span>
+          <span class="table-status ${hostStatusClass(host)}">${escapeHTML(hostStatusLabel(host))}</span>
         </div>
         <div class="overview-host-card-meta">
           <span>${escapeHTML(`${hostRoleLabel(host)} role · ${hostPlatformLabel(host)}`)}</span>
+          <span>${escapeHTML(`${hostAvailabilityLine(host)}${host.trusted ? ` · ${t('trusted access')}` : ` · ${t('first access needs the host password')}`}`)}</span>
         </div>
         <div class="overview-host-actions">
           <button
             class="btn btn-secondary overview-host-action"
             type="button"
             data-target="${escapeHTML(host.public_id || host.id || '')}"
+            ${hostReadyForSession(host) ? '' : 'disabled'}
           >
             <i class="fa-solid fa-tv"></i>
-            <span>Control host</span>
+            <span>${hostReadyForSession(host) ? (host.trusted ? t('Connect now') : t('Authenticate once')) : t('Not available')}</span>
           </button>
+          ${host.trusted ? `
+          <button
+            class="btn btn-secondary host-untrust-btn"
+            type="button"
+            data-target="${escapeHTML(host.id || host.public_id || '')}"
+          >
+            <i class="fa-solid fa-user-xmark"></i>
+            <span>${t('Forget')}</span>
+          </button>
+          ` : ''}
         </div>
       </article>
     `).join('');
     bindHostControlActions();
+    bindHostTrustActions();
+    translateFragment(overviewHostsGridEl);
+  }
+
+  function normalizeTargetLookup(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  function findKnownHostByTarget(target) {
+    const needle = normalizeTargetLookup(target);
+    if (!needle) return null;
+    return state.hosts.find((host) => {
+      return [
+        host && host.id,
+        host && host.public_id,
+        host && host.hostname,
+        host && host.name,
+      ].some((value) => normalizeTargetLookup(value) === needle);
+    }) || null;
+  }
+
+  function normalizeSessionKeyPart(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  function sessionBelongsToCurrentViewer(session) {
+    const currentViewer = normalizeSessionKeyPart(state.browserIdentity && state.browserIdentity.public_id);
+    if (!currentViewer) return false;
+    return normalizeSessionKeyPart(session && session.viewer) === currentViewer;
+  }
+
+  function sessionMatchesTarget(session, target) {
+    const needle = normalizeTargetLookup(target);
+    if (!needle || !session) return false;
+    return [
+      session.target,
+      session.routed_host_public_id,
+      session.routed_hostname,
+      session.routed_host_id,
+    ].some((value) => normalizeTargetLookup(value) === needle);
+  }
+
+  function sessionReusableRank(session) {
+    if (!session) return -1;
+    if (session.status === 'active' || session.dispatch_state === 'accepted') return 4;
+    if (session.status === 'offered') return 3;
+    if (session.dispatch_state === 'delivered' || session.dispatch_state === 'queued' || session.dispatch_state === 'busy') return 2;
+    if (session.status === 'pending') return 1;
+    return -1;
+  }
+
+  function compareSessionFreshness(a, b) {
+    const left = new Date((a && a.updated_at) || (a && a.created_at) || '').getTime();
+    const right = new Date((b && b.updated_at) || (b && b.created_at) || '').getTime();
+    const safeLeft = Number.isFinite(left) ? left : 0;
+    const safeRight = Number.isFinite(right) ? right : 0;
+    return safeRight - safeLeft;
+  }
+
+  function findReusableSession(target) {
+    return [...state.sessions]
+      .filter((session) => session && session.status !== 'closed')
+      .filter((session) => sessionBelongsToCurrentViewer(session))
+      .filter((session) => sessionMatchesTarget(session, target))
+      .sort((left, right) => {
+        const rankDelta = sessionReusableRank(right) - sessionReusableRank(left);
+        if (rankDelta !== 0) return rankDelta;
+        return compareSessionFreshness(left, right);
+      })[0] || null;
+  }
+
+  function updateConnectStatus() {
+    if (!sessionConnectStatusEl) return;
+    const selectedHost = findKnownHostByTarget(sessionTargetEl.value);
+    if (selectedHost && selectedHost.trusted) {
+      sessionConnectStatusEl.textContent = t('Trusted machine detected. You can reconnect without retyping the host password.');
+      sessionPasswordEl.placeholder = t('Optional for this trusted machine');
+      if (document.activeElement !== sessionPasswordEl) {
+        sessionPasswordEl.value = '';
+      }
+      return;
+    }
+    if (selectedHost) {
+      sessionConnectStatusEl.textContent = t('First approved connection will remember this host automatically for your account.');
+      sessionPasswordEl.placeholder = t('Password currently shown on the host browser');
+      return;
+    }
+    sessionConnectStatusEl.textContent = t('The first authenticated connection remembers this host for your account automatically.');
+    sessionPasswordEl.placeholder = t('Password currently shown on the host browser');
   }
 
   function bindHostControlActions() {
@@ -978,12 +993,49 @@
         const target = String(button.dataset.target || '').trim();
         if (!target) return;
         sessionTargetEl.value = target;
-        if (!sessionViewerEl.value && state.browserIdentity && state.browserIdentity.public_id) {
-          sessionViewerEl.value = state.browserIdentity.public_id;
+        updateConnectStatus();
+        setCurrentSection('connections');
+        const selectedHost = findKnownHostByTarget(target);
+        if ((!selectedHost || !selectedHost.trusted) && !sessionPasswordEl.value.trim()) {
+          setFeedback(null, 'success', t('Target host selected. Enter the current host password to continue.'));
+          sessionPasswordEl.focus();
+          return;
         }
         await createSession({ switchToSessions: false, preserveTarget: true });
       });
     });
+  }
+
+  function bindHostTrustActions() {
+    document.querySelectorAll('.host-untrust-btn[data-target]').forEach((button) => {
+      if (button.dataset.untrustBound === '1') return;
+      button.dataset.untrustBound = '1';
+      button.addEventListener('click', async () => {
+        const target = String(button.dataset.target || '').trim();
+        if (!target) return;
+        await untrustHost(target);
+      });
+    });
+  }
+
+  async function untrustHost(target) {
+    clearFeedback(null);
+    const response = await fetch('/api/v1/admin/hosts/untrust', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': state.csrfToken,
+      },
+      body: JSON.stringify({ target }),
+    });
+    captureCSRF(response);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setFeedback(null, 'error', data.error || t('Unable to forget this trusted machine.'));
+      return;
+    }
+    setFeedback(null, 'success', t('Trusted machine forgotten. The host password will be required again.'));
+    await loadHosts();
   }
 
   async function loadSessions() {
@@ -1001,6 +1053,7 @@
     sessionsTotalEl.textContent = String(state.sessions.length);
     if (!state.sessions.length) {
       sessionsTableBody.innerHTML = '<tr><td colspan="6">No sessions created yet.</td></tr>';
+      translateFragment(sessionsTableBody);
       return;
     }
     sessionsTableBody.innerHTML = [...state.sessions]
@@ -1025,6 +1078,7 @@
         </tr>
       `).join('');
     bindSessionActions();
+    translateFragment(sessionsTableBody);
   }
 
   function bindSessionActions() {
@@ -1034,32 +1088,90 @@
       button.addEventListener('click', async () => {
         const sessionID = String(button.dataset.sessionOpen || '').trim();
         if (!sessionID) return;
-        openSessionTab(sessionID);
+        await openSessionWhenReady(sessionID);
       });
     });
   }
 
+  async function openSessionWhenReady(sessionID) {
+    if (!sessionID) return;
+    const session = await fetchSession(sessionID);
+    if (sessionApprovalReady(session)) {
+      clearApprovalWait(sessionID);
+      openSessionTab(sessionID);
+      return;
+    }
+    if (sessionApprovalRejected(session)) {
+      clearApprovalWait(sessionID);
+      setFeedback(null, 'error', t('Host approval was refused or the request expired.'));
+      return;
+    }
+    await beginApprovalWait(sessionID, session.target || '', t('Waiting for host approval.'));
+  }
+
+  async function resumeExistingSession(session, target) {
+    if (!session || !session.id) return false;
+    const sessionID = String(session.id || '').trim();
+    if (!sessionID) return false;
+    if (sessionApprovalReady(session)) {
+      clearApprovalWait(sessionID);
+      openSessionTab(sessionID);
+      return true;
+    }
+    if (sessionApprovalRejected(session)) {
+      return false;
+    }
+    const message = session.dispatch_state === 'busy'
+      ? t('The host is already handling this request. Keeping the current approval flow open.')
+      : t('Reusing the current connection request for this host.');
+    await beginApprovalWait(sessionID, target || session.target || '', message);
+    return true;
+  }
+
   async function createSession(options = {}) {
-    const switchToSessions = options.switchToSessions !== false;
     const preserveTarget = options.preserveTarget === true;
     if (state.creatingSession) return;
     clearFeedback(null);
     const target = sessionTargetEl.value.trim();
-    const viewer = sessionViewerEl.value.trim();
-    if (!target || !viewer) {
-      setFeedback(null, 'error', 'Target and viewer are required.');
+    if (target && state.approvalWaitSessionID && state.approvalWaitTarget === target) {
+      const existingSessionID = state.approvalWaitSessionID;
+      await openSessionWhenReady(existingSessionID);
+      if (state.approvalWaitSessionID === existingSessionID && state.approvalWaitModalOpen) {
+        await repromptSession(existingSessionID, { feedbackTarget: 'approval' });
+      }
+      return;
+    }
+    const viewer = state.browserIdentity && state.browserIdentity.public_id
+      ? String(state.browserIdentity.public_id).trim()
+      : '';
+    const selectedHost = findKnownHostByTarget(target);
+    const password = selectedHost && selectedHost.trusted ? '' : sessionPasswordEl.value.trim();
+    if (!target) {
+      setFeedback(null, 'error', t('Host target is required.'));
+      return;
+    }
+    if (!viewer) {
+      setFeedback(null, 'error', t('This browser identity is not ready yet.'));
+      return;
+    }
+    const reusableSession = findReusableSession(target);
+    if (await resumeExistingSession(reusableSession, target)) {
+      return;
+    }
+    if (!password && (!selectedHost || !selectedHost.trusted)) {
+      setFeedback(null, 'error', t('Enter the host password for the first approved connection.'));
       return;
     }
     state.creatingSession = true;
     sessionCreateBtn.disabled = true;
     try {
-      const response = await fetch(sessionsCollectionURL, {
+      const response = await fetch('/api/v1/admin/hosts/connect', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-CSRF-Token': state.csrfToken,
         },
-        body: JSON.stringify({ target, viewer }),
+        body: JSON.stringify({ target, viewer, viewer_label: viewerLabel(), password }),
       });
       captureCSRF(response);
       const data = await response.json().catch(() => ({}));
@@ -1067,7 +1179,7 @@
         setFeedback(null, 'error', data.error || 'Unable to create session.');
         return;
       }
-      const sessionID = String(data.id || '').trim();
+      const sessionID = String(data.id || data.session?.id || '').trim();
       if (!sessionID) {
         console.error('Unexpected session creation response', data);
         setFeedback(null, 'error', data.error || 'Session creation returned no session id.');
@@ -1076,16 +1188,57 @@
       if (!preserveTarget) {
         sessionTargetEl.value = '';
       }
-      setFeedback(null, 'success', `Session ${sessionID} is ready.`);
-      await loadSessions();
-      if (switchToSessions) {
-        setCurrentSection('sessions');
-      }
-      openSessionTab(sessionID);
+      sessionPasswordEl.value = '';
+      updateConnectStatus();
+      await Promise.all([loadHosts(), loadSessions()]);
+      const message = data.used_trusted_access
+        ? t('Waiting for host approval. Trusted access is ready once the host accepts.')
+        : t('Waiting for host approval. This host will be trusted for your account after the first accepted connection.');
+      await beginApprovalWait(sessionID, target, message);
     } finally {
       state.creatingSession = false;
       sessionCreateBtn.disabled = false;
     }
+  }
+
+  async function repromptSession(sessionID, options = {}) {
+    const feedbackTarget = ['session', 'approval'].includes(options.feedbackTarget) ? options.feedbackTarget : 'global';
+    const response = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionID)}/reprompt`, {
+      method: 'POST',
+      headers: {
+        'X-CSRF-Token': state.csrfToken,
+      },
+    });
+    captureCSRF(response);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data.error || t('Unable to re-open the approval request right now.');
+      if (feedbackTarget === 'session') {
+        setSessionFeedback('error', message);
+      } else if (feedbackTarget === 'approval') {
+        setApprovalWaitFeedback('error', message);
+      } else {
+        setFeedback(null, 'error', message);
+      }
+      return false;
+    }
+    const message = t('Approval request sent to the host again.');
+    if (feedbackTarget === 'session') {
+      setSessionFeedback('success', message);
+    } else if (feedbackTarget === 'approval') {
+      setApprovalWaitFeedback('success', message);
+    } else {
+      setFeedback(null, 'success', message);
+    }
+    return true;
+  }
+
+  function viewerLabel() {
+    const localRuntimeHostname = `${state.localHostRuntime && state.localHostRuntime.hostname ? state.localHostRuntime.hostname : ''}`.trim();
+    if (localRuntimeHostname) return localRuntimeHostname;
+    const browserHostname = `${state.browserIdentity && state.browserIdentity.hostname ? state.browserIdentity.hostname : ''}`.trim();
+    if (browserHostname) return browserHostname;
+    return '';
   }
 
   async function closeCurrentSession() {
@@ -1101,6 +1254,7 @@
       setSessionFeedback('error', data.error || 'Unable to close this session.');
       return;
     }
+    clearApprovalWait(state.currentSessionID);
     renderSessionDetails(data);
     setSessionFeedback('success', `Session ${data.id} closed.`);
     await loadSessions();
@@ -1192,7 +1346,38 @@
     }, delay);
   }
 
+  function stopLocalHostPolling() {
+    if (state.localHostPollTimer) {
+      window.clearInterval(state.localHostPollTimer);
+      state.localHostPollTimer = null;
+    }
+  }
+
+  function startLocalHostPolling(delay = 2500) {
+    stopLocalHostPolling();
+    const tick = async () => {
+      if (document.hidden) return;
+      const available = await discoverLocalHostRuntime();
+      if (!available || !state.user) return;
+      if (!state.localHostRuntime.connected) {
+        const claimed = await claimLocalHostSilently();
+        if (claimed) {
+          await loadHosts().catch(() => {});
+        }
+      } else if (state.localHostRuntime.connected) {
+        await loadHosts().catch(() => {});
+      }
+    };
+    window.setTimeout(() => {
+      void tick();
+    }, Math.max(0, delay));
+    state.localHostPollTimer = window.setInterval(() => {
+      void tick();
+    }, 4000);
+  }
+
   sessionCreateBtn.addEventListener('click', createSession);
+  if (sessionLogToggleEl) sessionLogToggleEl.addEventListener('change', renderTransportLog);
   profileSaveBtn.addEventListener('click', saveProfile);
   preferencesSaveBtn.addEventListener('click', savePreferences);
   passwordChangeBtn.addEventListener('click', changePassword);
@@ -1213,6 +1398,12 @@
   });
   settingsModalCloseEl.addEventListener('click', closeSettingsModal);
   sessionModalCloseEl.addEventListener('click', closeSessionModal);
+  approvalWaitCloseEl.addEventListener('click', () => closeApprovalWaitModal({ preserveTracking: true }));
+  approvalWaitDismissBtn.addEventListener('click', () => closeApprovalWaitModal({ preserveTracking: true }));
+  approvalWaitRepromptBtn.addEventListener('click', async () => {
+    if (!state.approvalWaitSessionID) return;
+    await repromptSession(state.approvalWaitSessionID, { feedbackTarget: 'approval' });
+  });
   sessionRefreshBtn.addEventListener('click', async () => {
     try {
       await refreshSessionDetails();
@@ -1220,17 +1411,23 @@
       setSessionFeedback('error', 'Unable to refresh session details right now.');
     }
   });
-  sessionStartSignalingBtn.addEventListener('click', startViewerSignaling);
-  sessionSendPingBtn.addEventListener('click', () => {
-    sendViewerControlMessage({
-      type: 'ping',
-      session_id: state.currentSessionID,
-      sent_at: new Date().toISOString(),
-    });
+  sessionOpenControlBtn.addEventListener('click', () => {
+    if (!state.currentSessionID) return;
+    openSessionTab(state.currentSessionID);
   });
+  if (sessionRepromptBtn) {
+    sessionRepromptBtn.addEventListener('click', async () => {
+      if (!state.currentSessionID) return;
+      await repromptSession(state.currentSessionID, { feedbackTarget: 'session' });
+    });
+  }
   sessionCloseBtn.addEventListener('click', closeCurrentSession);
+  sessionTargetEl.addEventListener('input', updateConnectStatus);
   settingsModalBackdropEl.addEventListener('click', (event) => {
     if (event.target === settingsModalBackdropEl) closeSettingsModal();
+  });
+  approvalWaitBackdropEl.addEventListener('click', (event) => {
+    if (event.target === approvalWaitBackdropEl) closeApprovalWaitModal({ preserveTracking: true });
   });
   sessionModalBackdropEl.addEventListener('click', (event) => {
     if (event.target === sessionModalBackdropEl) closeSessionModal();
@@ -1238,25 +1435,37 @@
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && state.mobileMenuOpen) closeMobileMenu();
     if (event.key === 'Escape' && state.settingsModalOpen) closeSettingsModal();
+    if (event.key === 'Escape' && state.approvalWaitModalOpen) closeApprovalWaitModal({ preserveTracking: true });
     if (event.key === 'Escape' && state.sessionModalOpen) closeSessionModal();
+  });
+  window.addEventListener('unydesk:localechange', updateConnectStatus);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopLocalHostPolling();
+      return;
+    }
+    startLocalHostPolling(250);
   });
 
   bindNavigation();
-  bindRemotePad();
   bindSettingsTabs();
   loadPreferences();
   renderPreferences();
 
   try {
     await ensureBrowserIdentity();
-    await loadRuntimeInfo();
     const authenticated = await loadSession();
     if (!authenticated) return;
+    await discoverLocalHostRuntime();
+    if (state.localHostRuntime.available && !state.localHostRuntime.connected) {
+      await claimLocalHostSilently();
+    }
     const initialSection = (window.location.hash || '').replace(/^#/, '');
     setCurrentSection(initialSection || state.preferences.defaultSection || 'overview');
     await Promise.all([loadHosts(), loadSessions()]);
     scheduleDashboardRefresh(loadHosts, 5000);
     scheduleDashboardRefresh(loadSessions, 7000);
+    startLocalHostPolling(500);
   } catch (_error) {
     statusEl.textContent = 'Dashboard unavailable';
   }

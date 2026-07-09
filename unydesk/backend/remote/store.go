@@ -18,8 +18,11 @@ type MemoryStore struct {
 	mu                 sync.RWMutex
 	sessions           map[string]Session
 	hosts              map[string]Host
+	trustedHosts       map[string]TrustedHost
 	screenFrames       map[string]screenFrame
 	sessionSubscribers map[string]map[chan Session]struct{}
+	hostsPath          string
+	trustedHostsPath   string
 }
 
 type screenFrame struct {
@@ -31,6 +34,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		sessions:           make(map[string]Session),
 		hosts:              make(map[string]Host),
+		trustedHosts:       make(map[string]TrustedHost),
 		screenFrames:       make(map[string]screenFrame),
 		sessionSubscribers: make(map[string]map[chan Session]struct{}),
 	}
@@ -43,13 +47,21 @@ func normalizeSessionViewerAuthMode(value string) string {
 	return "account"
 }
 
-func hashStandaloneViewerToken(token string) string {
+func hashSecret(token string) string {
 	value := strings.TrimSpace(token)
 	if value == "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func hashStandaloneViewerToken(token string) string {
+	return hashSecret(token)
+}
+
+func hashHostAccessPassword(password string) string {
+	return hashSecret(password)
 }
 
 func (s *MemoryStore) List() []Session {
@@ -79,6 +91,7 @@ func (s *MemoryStore) Create(req CreateSessionRequest) Session {
 			ID:             newID(),
 			Target:         strings.TrimSpace(req.Target),
 			Viewer:         strings.TrimSpace(req.Viewer),
+			ViewerLabel:    strings.TrimSpace(req.ViewerLabel),
 			ViewerAuthMode: normalizeSessionViewerAuthMode(req.ViewerAuthMode),
 			Status:         StatusPending,
 			CreatedAt:      now,
@@ -104,6 +117,7 @@ func (s *MemoryStore) CreateRouted(req CreateSessionRequest, host *Host) Session
 		} else {
 			session.Target = strings.TrimSpace(req.Target)
 			session.Viewer = strings.TrimSpace(req.Viewer)
+			session.ViewerLabel = strings.TrimSpace(req.ViewerLabel)
 			session.ViewerAuthMode = normalizeSessionViewerAuthMode(req.ViewerAuthMode)
 			session.UpdatedAt = now
 		}
@@ -141,6 +155,7 @@ func newSession(req CreateSessionRequest, now time.Time) Session {
 		ID:             newID(),
 		Target:         strings.TrimSpace(req.Target),
 		Viewer:         strings.TrimSpace(req.Viewer),
+		ViewerLabel:    strings.TrimSpace(req.ViewerLabel),
 		ViewerAuthMode: normalizeSessionViewerAuthMode(req.ViewerAuthMode),
 		Status:         StatusPending,
 		CreatedAt:      now,
@@ -200,6 +215,44 @@ func (s *MemoryStore) ValidateStandaloneViewerToken(id, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(session.StandaloneTokenHash), []byte(hashed)) == 1
 }
 
+func (s *MemoryStore) ValidateHostAccessPassword(target, password string, timeout time.Duration) (Host, bool) {
+	needle := strings.TrimSpace(target)
+	hashed := hashHostAccessPassword(password)
+	if needle == "" || hashed == "" {
+		return Host{}, false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	now := time.Now().UTC()
+	hosts := make([]Host, 0, len(s.hosts))
+	for _, host := range s.hosts {
+		hosts = append(hosts, host)
+	}
+	sortHostsStable(hosts)
+
+	lookup := strings.ToLower(needle)
+	for _, host := range hosts {
+		host.Role = normalizeHostRole(host.Role)
+		host.Status = deriveHostStatus(host, timeout, now)
+		if host.Status != "online" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(host.ID)) != lookup &&
+			strings.ToLower(strings.TrimSpace(host.PublicID)) != lookup &&
+			strings.ToLower(strings.TrimSpace(host.Hostname)) != lookup &&
+			strings.ToLower(strings.TrimSpace(host.Name)) != lookup {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(host.PasswordHash)), []byte(hashed)) == 1 {
+			return host, true
+		}
+		return Host{}, false
+	}
+	return Host{}, false
+}
+
 func (s *MemoryStore) SetOffer(id string, sdp string) (Session, error) {
 	offer := strings.TrimSpace(sdp)
 	s.mu.Lock()
@@ -208,14 +261,17 @@ func (s *MemoryStore) SetOffer(id string, sdp string) (Session, error) {
 		s.mu.Unlock()
 		return Session{}, ErrNotFound
 	}
-	if strings.TrimSpace(session.OfferSDP) == offer {
+	previousOffer := strings.TrimSpace(session.OfferSDP)
+	if previousOffer == offer {
 		s.mu.Unlock()
 		return session, nil
 	}
 	session.OfferSDP = offer
 	session.AnswerSDP = ""
-	session.ViewerICECandidates = nil
-	session.HostICECandidates = nil
+	if previousOffer != "" {
+		session.ViewerICECandidates = nil
+		session.HostICECandidates = nil
+	}
 	session.Status = StatusOffered
 	if strings.TrimSpace(session.RoutedHostID) != "" {
 		session.DispatchState = "queued"
@@ -505,6 +561,7 @@ func (s *MemoryStore) findMatchingSessionLocked(req CreateSessionRequest) (strin
 func resetSession(session Session, req CreateSessionRequest, now time.Time) Session {
 	session.Target = strings.TrimSpace(req.Target)
 	session.Viewer = strings.TrimSpace(req.Viewer)
+	session.ViewerLabel = strings.TrimSpace(req.ViewerLabel)
 	session.ViewerAuthMode = normalizeSessionViewerAuthMode(req.ViewerAuthMode)
 	session.Status = StatusPending
 	session.OfferSDP = ""
@@ -534,6 +591,7 @@ func (s *MemoryStore) ListQueuedSessionsForHost(hostID string) []Session {
 	defer s.mu.RUnlock()
 
 	out := make([]Session, 0)
+	now := time.Now().UTC()
 	for _, session := range s.sessions {
 		if session.RoutedHostID != hostID {
 			continue
@@ -541,12 +599,28 @@ func (s *MemoryStore) ListQueuedSessionsForHost(hostID string) []Session {
 		if session.Status == StatusClosed {
 			continue
 		}
-		if session.DispatchState != "queued" {
+		if !sessionNeedsHostDispatch(session, now) {
 			continue
 		}
 		out = append(out, session)
 	}
 	return out
+}
+
+func sessionNeedsHostDispatch(session Session, now time.Time) bool {
+	if session.DispatchState == "queued" {
+		return true
+	}
+	if session.Status != StatusOffered {
+		return false
+	}
+	if strings.TrimSpace(session.OfferSDP) == "" || strings.TrimSpace(session.AnswerSDP) != "" {
+		return false
+	}
+	if session.LastDispatchAt == nil {
+		return true
+	}
+	return now.Sub(*session.LastDispatchAt) >= 2*time.Second
 }
 
 func (s *MemoryStore) MarkSessionsDispatched(ids []string) {
@@ -768,6 +842,7 @@ func (s *MemoryStore) RegisterHost(req RegisterHostRequest) Host {
 			InstallID:     req.InstallID,
 			Role:          normalizeHostRole(req.Role),
 			AccessEnabled: true,
+			AccessMode:    "password",
 			PublicID:      publicID,
 			RegisteredAt:  now,
 		}
@@ -782,10 +857,15 @@ func (s *MemoryStore) RegisterHost(req RegisterHostRequest) Host {
 	host.Hostname = req.Hostname
 	host.InstallID = req.InstallID
 	host.Role = normalizeHostRole(req.Role)
+	host.AccessMode = "password"
 	if req.AccessEnabled != nil {
 		host.AccessEnabled = *req.AccessEnabled
 	} else if !exists {
 		host.AccessEnabled = true
+	}
+	if hashed := hashHostAccessPassword(req.AccessPassword); hashed != "" {
+		host.PasswordHash = hashed
+		host.PasswordSeenAt = now
 	}
 	if !host.AccessEnabled {
 		host.Status = "paused"
@@ -795,6 +875,8 @@ func (s *MemoryStore) RegisterHost(req RegisterHostRequest) Host {
 	host.LastSeenAt = now
 
 	s.hosts[host.ID] = host
+	s.syncTrustedHostSnapshotsLocked(host)
+	_ = s.saveHostsLocked()
 	return host
 }
 
@@ -829,10 +911,10 @@ func (s *MemoryStore) findMatchingHostLocked(req RegisterHostRequest) (string, b
 }
 
 func (s *MemoryStore) TouchHost(id string) (Host, error) {
-	return s.TouchHostState(id, "", nil)
+	return s.TouchHostState(id, "", nil, "")
 }
 
-func (s *MemoryStore) TouchHostState(id string, role string, accessEnabled *bool) (Host, error) {
+func (s *MemoryStore) TouchHostState(id string, role string, accessEnabled *bool, accessPassword string) (Host, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -840,6 +922,7 @@ func (s *MemoryStore) TouchHostState(id string, role string, accessEnabled *bool
 	if !ok {
 		return Host{}, ErrNotFound
 	}
+	previous := host
 	if strings.TrimSpace(role) != "" {
 		host.Role = normalizeHostRole(role)
 	} else if host.Role == "" {
@@ -848,6 +931,13 @@ func (s *MemoryStore) TouchHostState(id string, role string, accessEnabled *bool
 	if accessEnabled != nil {
 		host.AccessEnabled = *accessEnabled
 	}
+	if hashed := hashHostAccessPassword(accessPassword); hashed != "" {
+		host.PasswordHash = hashed
+		host.PasswordSeenAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(host.AccessMode) == "" {
+		host.AccessMode = "password"
+	}
 	host.LastSeenAt = time.Now().UTC()
 	if !host.AccessEnabled {
 		host.Status = "paused"
@@ -855,7 +945,25 @@ func (s *MemoryStore) TouchHostState(id string, role string, accessEnabled *bool
 		host.Status = "online"
 	}
 	s.hosts[id] = host
+	if hostRoleOrAccessChanged(previous, host) {
+		s.syncTrustedHostSnapshotsLocked(host)
+		_ = s.saveHostsLocked()
+	}
 	return host, nil
+}
+
+func hostRoleOrAccessChanged(previous, current Host) bool {
+	return strings.TrimSpace(previous.Role) != strings.TrimSpace(current.Role) ||
+		previous.AccessEnabled != current.AccessEnabled ||
+		strings.TrimSpace(previous.AccessMode) != strings.TrimSpace(current.AccessMode) ||
+		strings.TrimSpace(previous.Name) != strings.TrimSpace(current.Name) ||
+		strings.TrimSpace(previous.OS) != strings.TrimSpace(current.OS) ||
+		strings.TrimSpace(previous.Arch) != strings.TrimSpace(current.Arch) ||
+		strings.TrimSpace(previous.Version) != strings.TrimSpace(current.Version) ||
+		strings.TrimSpace(previous.Hostname) != strings.TrimSpace(current.Hostname) ||
+		strings.TrimSpace(previous.PublicID) != strings.TrimSpace(current.PublicID) ||
+		strings.TrimSpace(previous.InstallID) != strings.TrimSpace(current.InstallID) ||
+		strings.TrimSpace(previous.PasswordHash) != strings.TrimSpace(current.PasswordHash)
 }
 
 func newPublicID() string {

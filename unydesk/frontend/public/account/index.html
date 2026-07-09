@@ -6,15 +6,18 @@
   <title>UnyDesk | Account Dashboard</title>
   <meta name="theme-color" content="#3e3aab">
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?v=20260629-card-radius">
+  <link rel="stylesheet" href="/styles.css?v=20260630-local-font">
   <link rel="preload" href="/vendor/fontawesome-7.min.css" as="style" data-deferred-stylesheet>
   <link rel="preload" href="/vendor/bootstrap-icon.min.css" as="style" data-deferred-stylesheet>
   <noscript>
     <link rel="stylesheet" href="/vendor/fontawesome-7.min.css">
     <link rel="stylesheet" href="/vendor/bootstrap-icon.min.css">
   </noscript>
-  <script defer src="/deferred-styles.js"></script>
-  <script defer src="/account/account.js?v=20260628-ui-restore"></script>
+  <script defer src="/js/deferred-styles.js"></script>
+  <script defer src="/js/i18n.js?v=20260704-simple-approval-wait"></script>
+  <script defer src="/js/local-host-bridge.js?v=20260703-loopback-claim"></script>
+  <script defer src="/js/password-toggle.js?v=20260703-password-eye"></script>
+  <script type="module" defer src="/account/account.js?v=20260704-simple-approval-wait"></script>
 </head>
 <body class="account-app">
   <div class="account-dashboard-shell">
@@ -34,14 +37,14 @@
           <span>Overview</span>
         </button>
 
-        <button class="account-nav-item" type="button" data-section="connections" title="Start a new connection">
+        <button class="account-nav-item" type="button" data-section="connections" title="Open or reuse a connection">
           <span class="account-nav-icon"><i class="fa-solid fa-plug-circle-plus"></i></span>
-          <span>New Connection</span>
+          <span>Connect</span>
         </button>
 
-        <button class="account-nav-item" type="button" data-section="hosts" title="Manage registered hosts">
+        <button class="account-nav-item" type="button" data-section="hosts" title="Manage registered machines">
           <span class="account-nav-icon"><i class="fa-solid fa-display"></i></span>
-          <span>Hosts</span>
+          <span>Machines</span>
         </button>
 
         <button class="account-nav-item" type="button" data-section="sessions" title="Review session activity">
@@ -98,11 +101,11 @@
         </button>
         <button class="account-nav-item" type="button" data-section="connections">
           <span class="account-nav-icon"><i class="fa-solid fa-plug-circle-plus"></i></span>
-          <span>New Connection</span>
+          <span>Connect</span>
         </button>
         <button class="account-nav-item" type="button" data-section="hosts">
           <span class="account-nav-icon"><i class="fa-solid fa-display"></i></span>
-          <span>Hosts</span>
+          <span>Machines</span>
         </button>
         <button class="account-nav-item" type="button" data-section="sessions">
           <span class="account-nav-icon"><i class="fa-solid fa-arrows-turn-right"></i></span>
@@ -136,6 +139,11 @@
             <i class="fa-solid fa-house"></i>
             <span>Back to home</span>
           </a>
+          <div class="language-switcher" data-i18n-skip aria-label="Language">
+            <button type="button" data-locale="en" aria-label="English" title="English"><img src="/assets/flag-gb.svg" alt="" class="locale-flag"></button>
+            <button type="button" data-locale="fr" aria-label="Français" title="Français"><img src="/assets/flag-fr.svg" alt="" class="locale-flag"></button>
+            <button type="button" data-locale="de" aria-label="Deutsch" title="Deutsch"><img src="/assets/flag-de.svg" alt="" class="locale-flag"></button>
+          </div>
         </div>
       </header>
 
@@ -146,8 +154,8 @@
 
         <section class="account-panel is-active" data-panel="overview">
           <div class="account-panel-copy">
-            <h1 class="slogan">Account Dashboard</h1>
-            <p>Manage your identity, active hosts, remote sessions, and local credentials from a single secured workspace.</p>
+            <h1 class="slogan">Remote Access Workspace</h1>
+            <p>Connect with a one-time UnyDesk host ID and the password shown by the host, then keep registered machines visible for future access.</p>
           </div>
 
           <div class="account-dashboard">
@@ -168,11 +176,11 @@
                   <strong id="account-email">—</strong>
                 </div>
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Local Client ID</span>
+                  <span class="dashboard-label">Browser Client ID</span>
                   <strong id="account-browser-id">Loading…</strong>
                 </div>
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Hosts online</span>
+                  <span class="dashboard-label">Ready hosts</span>
                   <strong id="hosts-online-count">0</strong>
                 </div>
               </div>
@@ -181,17 +189,17 @@
             <section class="dashboard-card">
               <div class="dashboard-head">
                 <div>
-                  <strong><i class="fa-solid fa-display"></i> Host Fleet</strong>
-                  <span>Track the live availability of your registered endpoints.</span>
+                  <strong><i class="fa-solid fa-display"></i> Registered Access</strong>
+                  <span>Machines saved for repeat access stay visible even when offline.</span>
                 </div>
               </div>
               <div class="dashboard-grid dashboard-grid-compact">
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Registered hosts</span>
+                  <span class="dashboard-label">Registered machines</span>
                   <strong id="hosts-total-count">0</strong>
                 </div>
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Offline hosts</span>
+                  <span class="dashboard-label">Not ready</span>
                   <strong id="hosts-offline-count">0</strong>
                 </div>
               </div>
@@ -200,17 +208,17 @@
             <section class="dashboard-card">
               <div class="dashboard-head">
                 <div>
-                  <strong><i class="fa-solid fa-arrows-turn-right"></i> Session Activity</strong>
-                  <span>Quick visibility on remote connection activity.</span>
+                  <strong><i class="fa-solid fa-arrows-turn-right"></i> Connection Activity</strong>
+                  <span>Reusable session records for active and recent remote access.</span>
                 </div>
               </div>
               <div class="dashboard-grid dashboard-grid-compact">
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Active sessions</span>
+                  <span class="dashboard-label">Live sessions</span>
                   <strong id="sessions-active-count">0</strong>
                 </div>
                 <div class="dashboard-stat">
-                  <span class="dashboard-label">Total sessions</span>
+                  <span class="dashboard-label">Session records</span>
                   <strong id="sessions-total-count">0</strong>
                 </div>
               </div>
@@ -219,12 +227,12 @@
             <section class="dashboard-card dashboard-span-2">
               <div class="dashboard-head">
                 <div>
-                  <strong><i class="fa-solid fa-laptop-house"></i> Connected Hosts</strong>
-                  <span>Live endpoints available right now from your registered fleet.</span>
+                  <strong><i class="fa-solid fa-laptop-house"></i> Registered Machines</strong>
+                  <span>Active, paused, and offline hosts from your saved fleet.</span>
                 </div>
               </div>
               <div class="overview-hosts-grid" id="overview-hosts-grid">
-                <div class="overview-host-empty">Loading connected hosts…</div>
+                <div class="overview-host-empty">Loading registered machines…</div>
               </div>
             </section>
           </div>
@@ -232,32 +240,38 @@
 
         <section class="account-panel" data-panel="connections">
           <div class="account-panel-copy">
-            <h2>New Connection</h2>
-            <p>Start a new remote session with a registered host, a public UnyDesk ID, or a direct IP:port target.</p>
+            <h2>Connect to a Host</h2>
+            <p>Enter the host ID and the password currently displayed by the host binary. After the first approved access, trusted machines can reconnect without retyping the password.</p>
           </div>
 
           <section class="dashboard-card">
             <div class="dashboard-form">
               <label class="auth-label">
-                <span><i class="bi bi-pc-display-horizontal"></i> Target</span>
-                <input class="auth-input" type="text" id="session-target" placeholder="Host ID, UnyDesk ID, or IP:port">
+                <span><i class="bi bi-pc-display-horizontal"></i> Host ID or registered machine</span>
+                <input class="auth-input" type="text" id="session-target" placeholder="123 456 789, host name, or IP:port">
               </label>
               <label class="auth-label">
-                <span><i class="bi bi-broadcast-pin"></i> Viewer / device ID</span>
-                <input class="auth-input" type="text" id="session-viewer" placeholder="Auto-filled from this browser identity">
+                <span><i class="bi bi-key-fill"></i> Host password</span>
+                <div class="password-input-wrap">
+                  <input class="auth-input" type="password" id="session-password" data-password-toggle placeholder="Password currently shown on the host browser">
+                  <button class="password-toggle-btn" type="button" data-password-toggle-btn data-show-label="Show password" data-hide-label="Hide password">
+                    <i class="fa-regular fa-eye"></i>
+                  </button>
+                </div>
               </label>
               <button class="btn btn-primary auth-submit" type="button" id="session-create-btn">
-                <i class="fa-solid fa-plus"></i>
-                <span>Create session</span>
+                <i class="fa-solid fa-arrow-right-to-bracket"></i>
+                <span>Connect or reuse access</span>
               </button>
+              <p class="dashboard-helper" id="session-connect-status">The first authenticated connection remembers this host for your account automatically.</p>
             </div>
           </section>
         </section>
 
         <section class="account-panel" data-panel="hosts">
           <div class="account-panel-copy">
-            <h2>Registered Hosts</h2>
-            <p>Review platform, public IDs, and heartbeat state before initiating a new session.</p>
+            <h2>Registered Machines</h2>
+            <p>Review saved machines, access state, platform, and last heartbeat before opening a session.</p>
           </div>
 
           <section class="dashboard-card">
@@ -265,8 +279,8 @@
               <table class="dashboard-table">
                 <thead>
                   <tr>
-                    <th>Host</th>
-                    <th>Public ID</th>
+                    <th>Machine</th>
+                    <th>UnyDesk ID</th>
                     <th>Platform</th>
                     <th>Status</th>
                     <th>Action</th>
@@ -388,7 +402,7 @@
                 <span><i class="fa-solid fa-compass"></i> Default section</span>
                 <select class="auth-input" id="pref-default-section">
                   <option value="overview">Overview</option>
-                  <option value="connections">New Connection</option>
+                  <option value="connections">Connect</option>
                   <option value="hosts">Hosts</option>
                   <option value="sessions">Sessions</option>
                 </select>
@@ -397,6 +411,38 @@
                 <i class="fa-solid fa-sliders"></i>
                 <span>Save preferences</span>
               </button>
+            </div>
+          </section>
+
+          <section class="settings-card">
+            <h3>Host Downloads</h3>
+            <p class="settings-card-desc">Downloads stay universal. If SERVER_URL is configured on the service, the claim API sends it to the local host. Otherwise this dashboard origin is used automatically.</p>
+            <div class="dashboard-helper">Install the host, open this account page on the same machine, then let the loopback bridge claim it once. No tenant-specific executable rebuild is generated.</div>
+            <div class="overview-hosts-grid bootstrap-package-grid">
+              <a class="btn btn-secondary" href="/download/host/windows-amd64.zip">
+                <i class="fa-brands fa-windows"></i>
+                <span>Windows 64-bit host</span>
+              </a>
+              <a class="btn btn-secondary" href="/download/host/windows-arm64.zip">
+                <i class="fa-brands fa-windows"></i>
+                <span>Windows ARM64 host</span>
+              </a>
+              <a class="btn btn-secondary" href="/download/host/linux-amd64.zip">
+                <i class="fa-brands fa-linux"></i>
+                <span>Linux 64-bit host</span>
+              </a>
+              <a class="btn btn-secondary" href="/download/host/linux-arm64.zip">
+                <i class="fa-brands fa-linux"></i>
+                <span>Linux ARM64 host</span>
+              </a>
+              <a class="btn btn-secondary" href="/download/host/macos-amd64.zip">
+                <i class="fa-brands fa-apple"></i>
+                <span>macOS Intel host</span>
+              </a>
+              <a class="btn btn-secondary" href="/download/host/macos-arm64.zip">
+                <i class="fa-brands fa-apple"></i>
+                <span>macOS Apple Silicon host</span>
+              </a>
             </div>
           </section>
         </div>
@@ -408,11 +454,21 @@
             <div class="dashboard-form">
               <label class="auth-label">
                 <span><i class="bi bi-shield-lock"></i> Current password</span>
-                <input class="auth-input" type="password" id="password-current" placeholder="Current password">
+                <div class="password-input-wrap">
+                  <input class="auth-input" type="password" id="password-current" data-password-toggle placeholder="Current password">
+                  <button class="password-toggle-btn" type="button" data-password-toggle-btn data-show-label="Show password" data-hide-label="Hide password">
+                    <i class="fa-regular fa-eye"></i>
+                  </button>
+                </div>
               </label>
               <label class="auth-label">
                 <span><i class="bi bi-key-fill"></i> New password</span>
-                <input class="auth-input" type="password" id="password-new" placeholder="New password">
+                <div class="password-input-wrap">
+                  <input class="auth-input" type="password" id="password-new" data-password-toggle placeholder="New password">
+                  <button class="password-toggle-btn" type="button" data-password-toggle-btn data-show-label="Show password" data-hide-label="Hide password">
+                    <i class="fa-regular fa-eye"></i>
+                  </button>
+                </div>
               </label>
               <button class="btn btn-primary auth-submit" type="button" id="password-change-btn">
                 <i class="fa-solid fa-lock"></i>
@@ -420,6 +476,54 @@
               </button>
             </div>
           </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="approval-wait-backdrop">
+    <div class="modal approval-wait-modal">
+      <div class="modal-head approval-wait-head">
+        <div>
+          <h3 id="approval-wait-title">Waiting for approval</h3>
+          <p id="approval-wait-subtitle">The host must authorize this connection before live control opens.</p>
+        </div>
+        <button class="modal-close" type="button" id="approval-wait-close" title="Close waiting modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div class="modal-body approval-wait-body">
+        <div class="approval-wait-card">
+          <div class="approval-wait-hero">
+            <span class="approval-wait-spinner" aria-hidden="true"></span>
+            <p class="approval-wait-message" id="approval-wait-message">Keep this window open while the host decides, or relaunch the request if the host popup was closed.</p>
+          </div>
+
+          <div class="message-container hidden" id="approval-wait-feedback-wrap">
+            <div class="global-feedback" id="approval-wait-feedback"></div>
+          </div>
+
+          <div class="approval-wait-meta">
+            <div class="dashboard-stat">
+              <span class="dashboard-label">Target host</span>
+              <strong id="approval-wait-target">—</strong>
+            </div>
+            <div class="dashboard-stat">
+              <span class="dashboard-label">Pending session</span>
+              <strong id="approval-wait-session">—</strong>
+            </div>
+          </div>
+
+          <div class="approval-wait-actions">
+            <button class="btn btn-primary" type="button" id="approval-wait-reprompt-btn">
+              <i class="fa-solid fa-bell"></i>
+              <span>Relaunch approval</span>
+            </button>
+            <button class="btn btn-secondary" type="button" id="approval-wait-dismiss-btn">
+              <i class="fa-solid fa-xmark"></i>
+              <span>Close</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -484,13 +588,13 @@
               </div>
             </div>
             <div class="session-modal-actions">
-              <button class="btn btn-primary" type="button" id="session-start-signaling-btn">
-                <i class="fa-solid fa-satellite-dish"></i>
-                <span>Start viewer signaling</span>
+              <button class="btn btn-primary" type="button" id="session-open-control-btn">
+                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                <span>Open live control</span>
               </button>
-              <button class="btn btn-secondary" type="button" id="session-send-ping-btn">
-                <i class="fa-solid fa-paper-plane"></i>
-                <span>Send ping</span>
+              <button class="btn btn-secondary" type="button" id="session-reprompt-btn">
+                <i class="fa-solid fa-bell"></i>
+                <span>Relaunch approval</span>
               </button>
               <button class="btn btn-secondary" type="button" id="session-refresh-btn">
                 <i class="fa-solid fa-rotate"></i>
@@ -503,11 +607,8 @@
             </div>
             <div class="session-control-pad">
               <div class="session-control-pad-head">
-                <strong>Control Pad</strong>
-                <span>Focus the pad, then move, click, or type to send input events.</span>
-              </div>
-              <div class="session-remote-pad" id="session-remote-pad" tabindex="0">
-                <span>Remote control surface</span>
+                <strong>Dedicated control page</strong>
+                <span>Use the full live control page for video, input, clipboard, files, and transport diagnostics.</span>
               </div>
             </div>
           </section>
@@ -515,8 +616,8 @@
           <section class="settings-card">
             <div class="dashboard-head">
               <div>
-                <strong><i class="fa-solid fa-wave-square"></i> Signaling</strong>
-                <span>Prepared for the upcoming host and viewer transport wiring.</span>
+                <strong><i class="fa-solid fa-wave-square"></i> Routing</strong>
+                <span>Session dispatch and broker state only. Live transport now runs on the dedicated control page.</span>
               </div>
             </div>
             <div class="dashboard-grid dashboard-grid-compact">
@@ -530,7 +631,7 @@
               </div>
               <div class="dashboard-stat dashboard-span-2">
                 <span class="dashboard-label">Viewer Transport</span>
-                <strong id="session-detail-viewer-transport">Idle</strong>
+                <strong id="session-detail-viewer-transport">Dedicated control page</strong>
               </div>
               <div class="dashboard-stat dashboard-span-2">
                 <span class="dashboard-label">ICE Candidates</span>
@@ -549,18 +650,31 @@
                 <strong id="session-detail-host-ack">—</strong>
               </div>
             </div>
-            <div class="dashboard-form">
+          </section>
+
+          <section class="settings-card session-diagnostics-card">
+            <div class="dashboard-head session-log-head">
+              <div>
+                <strong><i class="fa-solid fa-terminal"></i> Diagnostics Logs</strong>
+                <span>Keep this enabled only when debugging transport, latency, or signaling.</span>
+              </div>
+              <label class="session-log-toggle">
+                <input type="checkbox" id="session-log-toggle" checked>
+                <span>Enable live logs</span>
+              </label>
+            </div>
+            <div class="dashboard-form session-log-body" id="session-log-body">
               <label class="auth-label">
                 <span><i class="fa-solid fa-terminal"></i> Transport Log</span>
-                <textarea class="auth-input session-preview session-log" id="session-transport-log" readonly placeholder="WebRTC transport events will appear here."></textarea>
+                <textarea class="auth-input session-preview session-log" id="session-transport-log" readonly placeholder="Session lifecycle and routing events will appear here."></textarea>
               </label>
               <label class="auth-label">
                 <span><i class="fa-solid fa-file-waveform"></i> Offer Preview</span>
-                <textarea class="auth-input session-preview" id="session-offer-preview" readonly placeholder="Offer SDP will appear here when the viewer transport is connected."></textarea>
+                <textarea class="auth-input session-preview" id="session-offer-preview" readonly placeholder="Offer SDP preview is available for inspection only."></textarea>
               </label>
               <label class="auth-label">
                 <span><i class="fa-solid fa-file-circle-check"></i> Answer Preview</span>
-                <textarea class="auth-input session-preview" id="session-answer-preview" readonly placeholder="Answer SDP will appear here when the host transport is connected."></textarea>
+                <textarea class="auth-input session-preview" id="session-answer-preview" readonly placeholder="Answer SDP preview is available for inspection only."></textarea>
               </label>
             </div>
           </section>

@@ -89,6 +89,7 @@ func runLocalHostTray(ctx context.Context) {
 	defer func() {
 		trayWindowHandle = 0
 	}()
+	_ = initLocalHostPanel(hInstance)
 
 	if !addLocalHostTrayIcon(hwnd, class.HIcon) {
 		_ = win.DestroyWindow(hwnd)
@@ -139,6 +140,9 @@ func handleLocalHostTrayWindowMessage(hwnd win.HWND, msg uint32, wParam, lParam 
 	case trayCallbackMessage:
 		switch localHostTrayEventCode(lParam) {
 		case win.NIN_BALLOONUSERCLICK:
+			if hasPendingHostApproval() && showLocalHostPanel() {
+				return 0
+			}
 			showLocalHostTrayMenu(hwnd)
 			return 0
 		case win.WM_RBUTTONUP, win.WM_CONTEXTMENU, win.NIN_KEYSELECT:
@@ -153,6 +157,7 @@ func handleLocalHostTrayWindowMessage(hwnd win.HWND, msg uint32, wParam, lParam 
 		return 0
 	case win.WM_DESTROY:
 		removeLocalHostTrayIcon()
+		destroyLocalHostPanel()
 		win.PostQuitMessage(0)
 		return 0
 	}
@@ -227,7 +232,7 @@ func localHostTrayBaseLabel(snapshot hostUIStatus) string {
 	if hostname == "" {
 		return "UnyDesk"
 	}
-	return "UnyDesk • " + hostname
+	return hostname
 }
 
 func setLocalHostTrayString(dst []uint16, value string) {
@@ -315,6 +320,10 @@ func localHostTrayStateLabel(snapshot hostUIStatus) string {
 	switch {
 	case snapshot.PendingApproval:
 		return "Approval needed"
+	case strings.EqualFold(strings.TrimSpace(snapshot.ConnectionState), "Link required"):
+		return "Link required"
+	case strings.EqualFold(strings.TrimSpace(snapshot.ConnectionState), "Provisioning required"):
+		return "Provisioning required"
 	case !snapshot.AccessEnabled:
 		return "Remote access stopped"
 	case snapshot.Connected:

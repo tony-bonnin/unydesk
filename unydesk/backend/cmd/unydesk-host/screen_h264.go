@@ -17,8 +17,9 @@ import (
 	"time"
 
 	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/h264reader"
 )
 
@@ -27,6 +28,11 @@ var (
 	errH264EncoderOverloaded = errors.New("h264 encoder overloaded")
 	errH264NetworkCongested  = errors.New("h264 network congested")
 	errH264StableUpgrade     = errors.New("h264 encoder profile stable")
+)
+
+const (
+	h264RTPClockRate = 90000
+	h264PayloadMTU   = 1200
 )
 
 type h264AdaptiveProfile struct {
@@ -43,14 +49,14 @@ type h264AdaptiveProfile struct {
 	EncodedDropThreshold int
 }
 
-func newH264ScreenTrack(pc *webrtc.PeerConnection, sessionID string) (*webrtc.TrackLocalStaticSample, *h264NetworkMonitor, error) {
+func newH264ScreenTrack(pc *webrtc.PeerConnection, sessionID string) (*webrtc.TrackLocalStaticRTP, *h264NetworkMonitor, error) {
 	if _, ok := lookupFFmpegBinary(); !ok {
 		return nil, nil, fmt.Errorf("ffmpeg encoder not found")
 	}
 
-	track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
+	track, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType:    webrtc.MimeTypeH264,
-		ClockRate:   90000,
+		ClockRate:   h264RTPClockRate,
 		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
 	}, "screen-video", "unydesk-screen")
 	if err != nil {
@@ -77,7 +83,7 @@ func newH264ScreenTrack(pc *webrtc.PeerConnection, sessionID string) (*webrtc.Tr
 	return track, networkMonitor, nil
 }
 
-func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionID string, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, emitStatus func(map[string]any), emitError func(string), markFirstSample func()) {
+func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionID string, track *webrtc.TrackLocalStaticRTP, networkMonitor *h264NetworkMonitor, emitStatus func(map[string]any), emitError func(string), markFirstSample func()) {
 	ffmpegPath, ok := lookupFFmpegBinary()
 	if !ok {
 		message := "H.264 encoder unavailable: install ffmpeg.exe next to unydesk-host.exe or add FFmpeg to PATH."
@@ -199,7 +205,7 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 	}
 }
 
-func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID, ffmpegPath string, pipeline *screenPipeline, track *webrtc.TrackLocalStaticSample, networkMonitor *h264NetworkMonitor, profile h264AdaptiveProfile, emitStatus func(map[string]any), markFirstSample func()) error {
+func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID, ffmpegPath string, pipeline *screenPipeline, track *webrtc.TrackLocalStaticRTP, networkMonitor *h264NetworkMonitor, profile h264AdaptiveProfile, emitStatus func(map[string]any), markFirstSample func()) error {
 	firstFrame, err := captureH264Frame(pipeline)
 	if err != nil {
 		return err
@@ -264,7 +270,7 @@ func runH264EncoderSession(ctx context.Context, done <-chan struct{}, sessionID,
 		errCh <- writeH264RawFrames(encoderCtx, done, pipeline, stdin, firstFrame, width, height, frameDuration, sessionID, profile, metrics)
 	}()
 	go func() {
-		errCh <- writeH264Samples(stdout, track, frameDuration, sessionID, profile, metrics, markFirstSample)
+		errCh <- writeH264RTPPackets(stdout, track, frameDuration, sessionID, profile, metrics, markFirstSample)
 	}()
 	go func() {
 		errCh <- cmd.Wait()
@@ -458,11 +464,10 @@ func h264AdaptiveEnabled() bool {
 }
 
 func h264UpgradeAfter() time.Duration {
-	seconds := h264IntEnv("UNYDESK_H264_UPSHIFT_AFTER_SEC", 25, 0, 300)
-	if seconds <= 0 {
-		return 0
-	}
-	return time.Duration(seconds) * time.Second
+	// Default to stability: automatic quality upshifts can restart the encoder
+	// mid-session and have proven brittle on some Windows hosts/viewers.
+	// Keep the automatic upshift path disabled until it can be made seamless.
+	return 0
 }
 
 func h264OverloadWindow() time.Duration {
@@ -498,11 +503,14 @@ func h264EncoderThreads() int {
 
 func h264NetworkAdaptiveEnabled() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("UNYDESK_H264_NETWORK_ADAPTIVE")))
+	if raw == "" {
+		return false
+	}
 	return raw != "0" && raw != "false" && raw != "off" && raw != "no"
 }
 
 func h264StartupTimeout() time.Duration {
-	ms := h264IntEnv("UNYDESK_H264_STARTUP_TIMEOUT_MS", 2500, 500, 15000)
+	ms := h264IntEnv("UNYDESK_H264_STARTUP_TIMEOUT_MS", 6000, 1000, 15000)
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -942,6 +950,15 @@ func (metrics *realtimeVideoMetrics) observeEncodedSample(bytes int, queuedAt ti
 	}
 }
 
+func (metrics *realtimeVideoMetrics) firstEncodedSampleSent() bool {
+	if metrics == nil {
+		return false
+	}
+	metrics.mu.Lock()
+	defer metrics.mu.Unlock()
+	return !metrics.firstSentAt.IsZero()
+}
+
 func emitRealtimeVideoMetricSnapshot(snapshot realtimeVideoMetricSnapshot) {
 	fmt.Printf("%s video metrics for %s: action=%s profile=%s uptime=%s frames=%d raw_frames=%d fps=%.1f bitrate=%.0fkbps bytes=%d queue=%s max_queue=%s raw_drops=%d encoded_drops=%d\n",
 		strings.ToUpper(snapshot.codec),
@@ -1024,7 +1041,6 @@ func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *scr
 
 	maxFrameAge := profile.MaxFrameAge
 	lastDropLogAt := time.Time{}
-	overloadTracker := newH264OverloadTracker(profile.RawDropThreshold, profile.OverloadWindow)
 	recordDrop := func(score int, message string) error {
 		if score <= 0 {
 			return nil
@@ -1034,9 +1050,11 @@ func writeH264RawFrames(ctx context.Context, done <-chan struct{}, pipeline *scr
 			fmt.Printf("H264 screen %s %s\n", sessionID, message)
 		}
 		metrics.observeRawDrop(score)
-		if overloadTracker.record(score) {
-			return errH264EncoderOverloaded
+		if !metrics.firstEncodedSampleSent() {
+			return nil
 		}
+		// Keep the live session running once H.264 is already on screen:
+		// mid-session adaptive restarts have proven more harmful than a few drops.
 		return nil
 	}
 	for {
@@ -1167,7 +1185,7 @@ func contiguousRGBAFrameBytes(frame *image.RGBA, width, height int) ([]byte, boo
 	return out, true
 }
 
-func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile, metrics *realtimeVideoMetrics, markFirstSample func()) error {
+func writeH264RTPPackets(reader io.Reader, track *webrtc.TrackLocalStaticRTP, frameDuration time.Duration, sessionID string, profile h264AdaptiveProfile, metrics *realtimeVideoMetrics, markFirstSample func()) error {
 	samples := make(chan h264EncodedSample, 1)
 	encodedDropCh := make(chan int, 16)
 	readErrCh := make(chan error, 1)
@@ -1176,9 +1194,10 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 		close(samples)
 	}()
 
+	packetizer := rtp.NewPacketizer(h264PayloadMTU, 0, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), h264RTPClockRate)
+	samplesPerFrame := uint32(maxInt(1, int(frameDuration*time.Duration(h264RTPClockRate)/time.Second)))
 	lastDropLogAt := time.Time{}
 	firstSampleMarked := false
-	overloadTracker := newH264OverloadTracker(profile.EncodedDropThreshold, profile.OverloadWindow)
 	recordDrop := func(score int, message string) error {
 		if score <= 0 {
 			return nil
@@ -1188,9 +1207,11 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 			fmt.Printf("H264 screen %s %s\n", sessionID, message)
 		}
 		metrics.observeEncodedDrop(score)
-		if overloadTracker.record(score) {
-			return errH264EncoderOverloaded
+		if !metrics.firstEncodedSampleSent() {
+			return nil
 		}
+		// Keep the live session running once H.264 is already on screen:
+		// mid-session adaptive restarts have proven more harmful than a few drops.
 		return nil
 	}
 	for {
@@ -1232,8 +1253,14 @@ func writeH264Samples(reader io.Reader, track *webrtc.TrackLocalStaticSample, fr
 				}
 				continue
 			}
-			if err := track.WriteSample(media.Sample{Data: sample.data, Duration: frameDuration}); err != nil {
-				return err
+			packets := packetizer.Packetize(sample.data, samplesPerFrame)
+			if len(packets) == 0 {
+				continue
+			}
+			for _, packet := range packets {
+				if err := track.WriteRTP(packet); err != nil {
+					return err
+				}
 			}
 			metrics.observeEncodedSample(len(sample.data), sample.queuedAt, true)
 			if !firstSampleMarked {

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
@@ -15,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -24,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/quic-go/quic-go/http3"
 	"unydesk/auth"
 	"unydesk/config"
 	"unydesk/remote"
@@ -43,19 +42,22 @@ const (
 )
 
 type Server struct {
-	httpServer *http.Server
-	logger     *slog.Logger
-	cfg        config.Settings
-	store      *remote.MemoryStore
-	authStore  *auth.Store
-	publicID   string
-	hostMu     sync.RWMutex
-	hostConns  map[string]*hostConn
-	eventMu    sync.RWMutex
-	eventSubs  map[string]map[*hostConn]struct{}
-	screenMu   sync.RWMutex
-	screenSubs map[string]*screenRelay
-	downloadMu sync.Mutex
+	httpServer     *http.Server
+	http3Server    *http3.Server
+	redirectServer *http.Server
+	addr           string
+	http3Addr      string
+	logger         *slog.Logger
+	cfg            config.Settings
+	store          *remote.MemoryStore
+	authStore      *auth.Store
+	publicID       string
+	hostMu         sync.RWMutex
+	hostConns      map[string]*hostConn
+	eventMu        sync.RWMutex
+	eventSubs      map[string]map[*hostConn]struct{}
+	screenMu       sync.RWMutex
+	screenSubs     map[string]*screenRelay
 }
 
 type hostConn struct {
@@ -203,30 +205,24 @@ func New(cfg config.Settings, store *remote.MemoryStore, authStore *auth.Store, 
 	mux.HandleFunc("/api/v1/auth/session", s.handleAuthSession)
 	mux.HandleFunc("/api/v1/auth/password", s.handleAuthPassword)
 	mux.HandleFunc("/api/v1/profile", s.handleProfile)
+	mux.HandleFunc("/api/v1/bootstrap/claim", s.handleBootstrapClaim)
+	mux.HandleFunc("/api/v1/bootstrap/provision", s.handleBootstrapProvision)
 	mux.HandleFunc("/api/v1/hosts", s.handleHosts)
 	mux.HandleFunc("/api/v1/hosts/ws", s.handleHostsWS)
+	mux.HandleFunc("/api/v1/admin/hosts", s.handleAdminHosts)
+	mux.HandleFunc("/api/v1/admin/trusted-hosts", s.handleAdminTrustedHosts)
+	mux.HandleFunc("/api/v1/admin/hosts/connect", s.handleAdminHostConnect)
+	mux.HandleFunc("/api/v1/admin/hosts/trust", s.handleAdminHostTrust)
+	mux.HandleFunc("/api/v1/admin/hosts/untrust", s.handleAdminHostUntrust)
+	mux.HandleFunc("/api/v1/admin/hosts/bulk/trust", s.handleAdminHostsBulkTrust)
 	mux.HandleFunc("/api/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/api/v1/sessions/", s.handleSessionByID)
 	s.registerFrontendRoutes(mux)
 
-	s.httpServer = &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: s.withCORS(s.withSecurityHeaders(s.withCSRFCookie(s.withCSRFProtection(s.withLogging(mux))))),
-	}
+	handler := s.withCORS(s.withSecurityHeaders(s.withCSRFCookie(s.withCSRFProtection(s.withLogging(mux)))))
+	s.configureTransport(handler)
 
 	return s
-}
-
-func (s *Server) ListenAndServe() error {
-	err := s.httpServer.ListenAndServe()
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
-	}
-	return err
-}
-
-func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -255,6 +251,14 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"enabled":                s.cfg.Features.WebRTC,
 			"ice_servers":            s.cfg.WebRTC.ICEServers,
 			"preferred_video_codecs": s.cfg.Features.PreferredVideoCodecs,
+		},
+		"http3": map[string]any{
+			"enabled":         s.cfg.HTTP3.Enabled,
+			"listen_addr":     s.addr,
+			"quic_addr":       s.http3Addr,
+			"port":            s.cfg.HTTP3.Port,
+			"redirect_http":   s.cfg.HTTP3.RedirectHTTP,
+			"cert_configured": strings.TrimSpace(s.cfg.HTTP3.CertFile) != "" && strings.TrimSpace(s.cfg.HTTP3.KeyFile) != "",
 		},
 		"quic": map[string]any{
 			"enabled": s.cfg.Features.QUIC,
@@ -290,6 +294,17 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			"session":  "/api/v1/auth/session",
 			"password": "/api/v1/auth/password",
 			"profile":  "/api/v1/profile",
+		},
+		"admin_api": map[string]string{
+			"hosts":             "/api/v1/admin/hosts",
+			"trusted_hosts":     "/api/v1/admin/trusted-hosts",
+			"connect_host":      "/api/v1/admin/hosts/connect",
+			"trust_host":        "/api/v1/admin/hosts/trust",
+			"untrust_host":      "/api/v1/admin/hosts/untrust",
+			"bulk_trust_hosts":  "/api/v1/admin/hosts/bulk/trust",
+			"create_session":    "/api/v1/sessions",
+			"list_sessions":     "/api/v1/sessions",
+			"close_session_url": "/api/v1/sessions/{id}/close",
 		},
 	})
 }
@@ -473,243 +488,6 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleHostDownload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store, max-age=0")
-
-	target := strings.TrimPrefix(r.URL.Path, "/download/host/")
-	spec, ok := hostTargetSpec(target)
-	if !ok {
-		writeError(w, http.StatusNotFound, "host download not found")
-		return
-	}
-
-	path := filepath.Join(s.cfg.Paths.HostDownloadsDir, spec.filename)
-	if _, err := os.Stat(path); err != nil {
-		writeError(w, http.StatusNotFound, "host binary not available yet")
-		return
-	}
-
-	if spec.filename == "SHA256SUMS" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeFile(w, r, path)
-		return
-	}
-
-	installID := strings.TrimSpace(r.URL.Query().Get("install_id"))
-	if installID == "" {
-		installID = strings.TrimSpace(readCookieValue(r, browserTokenCookieName))
-	}
-	if !isValidInstallID(installID) {
-		installID = ""
-	}
-	if installID != "" && spec.goos != "" && spec.goarch != "" && !strings.HasSuffix(spec.filename, ".zip") {
-		pairedPath, err := s.compilePairedHostBinary(spec, installID, baseServerURL(r))
-		if err != nil {
-			s.logger.Warn("paired host build failed", "target", target, "install_id", installID, "err", err)
-			writeError(w, http.StatusInternalServerError, "unable to prepare paired host binary")
-			return
-		}
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", spec.filename))
-		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeFile(w, r, pairedPath)
-		return
-	}
-
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", spec.filename))
-	if strings.HasSuffix(spec.filename, ".zip") {
-		w.Header().Set("Content-Type", "application/zip")
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
-	}
-	http.ServeFile(w, r, path)
-}
-
-type hostDownloadSpec struct {
-	goos     string
-	goarch   string
-	filename string
-}
-
-func hostTargetSpec(target string) (hostDownloadSpec, bool) {
-	switch target {
-	case "linux-amd64":
-		return hostDownloadSpec{goos: "linux", goarch: "amd64", filename: "unydesk-host-linux-amd64"}, true
-	case "linux-amd64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-linux-amd64.zip"}, true
-	case "linux-arm64":
-		return hostDownloadSpec{goos: "linux", goarch: "arm64", filename: "unydesk-host-linux-arm64"}, true
-	case "linux-arm64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-linux-arm64.zip"}, true
-	case "windows-amd64":
-		return hostDownloadSpec{goos: "windows", goarch: "amd64", filename: "unydesk-host-windows-amd64.exe"}, true
-	case "windows-amd64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-windows-amd64.zip"}, true
-	case "windows-arm64":
-		return hostDownloadSpec{goos: "windows", goarch: "arm64", filename: "unydesk-host-windows-arm64.exe"}, true
-	case "windows-arm64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-windows-arm64.zip"}, true
-	case "macos-amd64":
-		return hostDownloadSpec{goos: "darwin", goarch: "amd64", filename: "unydesk-host-darwin-amd64"}, true
-	case "macos-amd64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-macos-amd64.zip"}, true
-	case "macos-arm64":
-		return hostDownloadSpec{goos: "darwin", goarch: "arm64", filename: "unydesk-host-darwin-arm64"}, true
-	case "macos-arm64.zip":
-		return hostDownloadSpec{filename: "unydesk-host-macos-arm64.zip"}, true
-	case "checksums":
-		return hostDownloadSpec{filename: "SHA256SUMS"}, true
-	}
-	return hostDownloadSpec{}, false
-}
-
-func (s *Server) compilePairedHostBinary(spec hostDownloadSpec, installID, serverURL string) (string, error) {
-	s.downloadMu.Lock()
-	defer s.downloadMu.Unlock()
-
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	sourceFingerprint := hostBinarySourceFingerprint(wd)
-	cacheKey := remote.StableID("paired-host", sourceFingerprint+":"+spec.goos+":"+spec.goarch+":"+strings.TrimSpace(installID)+":"+strings.TrimSpace(serverURL))
-	outDir := filepath.Join(s.cfg.Paths.HostDownloadsDir, "paired")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", err
-	}
-	outPath := filepath.Join(outDir, cacheKey+"-"+spec.filename)
-	if _, err := os.Stat(outPath); err == nil {
-		return outPath, nil
-	}
-
-	ldflagsParts := []string{
-		"-s",
-		"-w",
-		"-buildid=",
-		fmt.Sprintf("-X main.defaultServerURL=%s", strings.TrimSpace(serverURL)),
-		fmt.Sprintf("-X main.defaultInstallID=%s", strings.TrimSpace(installID)),
-	}
-	if spec.goos == "windows" {
-		ldflagsParts = append([]string{"-H=windowsgui"}, ldflagsParts...)
-	}
-	ldflags := strings.Join(ldflagsParts, " ")
-	args := []string{"build", "-trimpath", "-buildvcs=false"}
-	if hostFFmpegEmbedAvailable(wd, spec.goos, spec.goarch) {
-		args = append(args, "-tags", "ffmpegembed")
-	}
-	args = append(args, "-ldflags", ldflags, "-o", outPath, "./cmd/unydesk-host")
-	cmd := exec.Command("go", args...)
-	cmd.Dir = wd
-	cmd.Env = append(os.Environ(),
-		"CGO_ENABLED=0",
-		"GOOS="+spec.goos,
-		"GOARCH="+spec.goarch,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		_ = os.Remove(outPath)
-		return "", fmt.Errorf("go build failed: %s", strings.TrimSpace(string(output)))
-	}
-	if err := compressPairedHostBinary(outPath, spec); err != nil {
-		slog.Debug("paired host UPX compression skipped", "path", outPath, "error", err)
-	}
-	return outPath, nil
-}
-
-func compressPairedHostBinary(path string, spec hostDownloadSpec) error {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("UNYDESK_DISABLE_UPX")), "1") {
-		return nil
-	}
-	if !pairedHostUPXSupported(spec) {
-		return nil
-	}
-	upxPath, err := exec.LookPath("upx")
-	if err != nil {
-		return err
-	}
-	flags := strings.Fields(strings.TrimSpace(os.Getenv("UNYDESK_UPX_FLAGS")))
-	if len(flags) == 0 {
-		flags = []string{"--best", "--lzma"}
-	}
-	if strings.TrimSpace(os.Getenv("UNYDESK_UPX_ULTRA")) == "1" {
-		flags = []string{"--ultra-brute", "--lzma"}
-	}
-	args := append(flags, path)
-	cmd := exec.Command(upxPath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("upx failed: %s", strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func pairedHostUPXSupported(spec hostDownloadSpec) bool {
-	switch spec.goos {
-	case "linux":
-		return spec.goarch == "amd64" || spec.goarch == "arm64"
-	case "windows":
-		return spec.goarch == "amd64"
-	default:
-		return false
-	}
-}
-
-func hostFFmpegEmbedAvailable(root, goos, goarch string) bool {
-	if goos != "windows" || goarch != "amd64" {
-		return false
-	}
-	path := filepath.Join(root, "cmd", "unydesk-host", "embedded", "ffmpeg", "windows-amd64", "ffmpeg.exe.gz")
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Size() > 0
-}
-
-func hostBinarySourceFingerprint(root string) string {
-	hasher := sha256.New()
-	inputs := []string{
-		filepath.Join(root, "go.mod"),
-		filepath.Join(root, "go.sum"),
-		filepath.Join(root, "cmd", "unydesk-host"),
-	}
-
-	for _, path := range inputs {
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if !info.IsDir() {
-			fmt.Fprintf(hasher, "%s|%d|%d\n", path, info.Size(), info.ModTime().UnixNano())
-			continue
-		}
-		_ = filepath.WalkDir(path, func(current string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil || entry.IsDir() {
-				return walkErr
-			}
-			fileInfo, err := entry.Info()
-			if err != nil {
-				return nil
-			}
-			fmt.Fprintf(hasher, "%s|%d|%d\n", current, fileInfo.Size(), fileInfo.ModTime().UnixNano())
-			return nil
-		})
-	}
-
-	return fmt.Sprintf("%x", hasher.Sum(nil))
-}
-
-func baseServerURL(r *http.Request) string {
-	if value := strings.TrimSpace(os.Getenv("UNYDESK_PUBLIC_SERVER")); value != "" {
-		return strings.TrimRight(value, "/")
-	}
-	scheme := "http"
-	if requestIsHTTPS(r) {
-		scheme = "https"
-	}
-	return fmt.Sprintf("%s://%s", scheme, r.Host)
-}
-
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.currentUserFromRequest(r); !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -746,9 +524,10 @@ func (s *Server) handleStandaloneSession(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req struct {
-		Target   string `json:"target"`
-		Viewer   string `json:"viewer"`
-		Password string `json:"password"`
+		Target      string `json:"target"`
+		Viewer      string `json:"viewer"`
+		ViewerLabel string `json:"viewer_label,omitempty"`
+		Password    string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -766,38 +545,57 @@ func (s *Server) handleStandaloneSession(w http.ResponseWriter, r *http.Request)
 	createReq := remote.CreateSessionRequest{
 		Target:         target,
 		Viewer:         viewer,
+		ViewerLabel:    strings.TrimSpace(req.ViewerLabel),
 		ViewerAuthMode: "standalone",
 	}
 
 	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
-	var session remote.Session
-	if host, ok := s.store.FindHostByTarget(createReq.Target, timeout); ok {
-		session = s.store.CreateRouted(createReq, &host)
-	} else {
-		session = s.store.Create(createReq)
+	host, ok := s.store.ValidateHostAccessPassword(createReq.Target, password, timeout)
+	if !ok {
+		if _, available := s.store.FindHostByTarget(createReq.Target, timeout); available {
+			writeError(w, http.StatusForbidden, "invalid host password")
+			return
+		}
+		writeError(w, http.StatusNotFound, "target host is offline or unavailable")
+		return
 	}
+	session := s.store.CreateRouted(createReq, &host)
 
-	session, err := s.store.SetStandaloneViewerToken(session.ID, password)
+	viewerToken, err := newStandaloneViewerToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to provision viewer session token")
+		return
+	}
+	session, err = s.store.SetStandaloneViewerToken(session.ID, viewerToken)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusCreated, session)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":           session.ID,
+		"session":      session,
+		"viewer_token": viewerToken,
+	})
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if _, ok := s.currentUserFromRequest(r); !ok {
+		user, ok := s.currentUserFromRequest(r)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
 		writeJSON(w, http.StatusOK, map[string]any{
-			"hosts":                     s.store.ListHostsWithTimeout(timeout),
+			"hosts":                     s.hostViewsForUser(user, timeout),
 			"heartbeat_timeout_seconds": s.cfg.Remote.HostHeartbeatSeconds,
 		})
 	case http.MethodPost:
+		if _, ok := s.provisioningUserFromRequest(r); !ok {
+			writeError(w, http.StatusUnauthorized, "provisioning credentials required")
+			return
+		}
 		var req remote.RegisterHostRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json body")
@@ -813,7 +611,335 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type hostAccountView struct {
+	remote.Host
+	Trusted           bool       `json:"trusted"`
+	TrustedAt         *time.Time `json:"trusted_at,omitempty"`
+	TrustedLastUsedAt *time.Time `json:"trusted_last_used_at,omitempty"`
+}
+
+type trustedHostAccountView struct {
+	remote.TrustedHost
+	Host *remote.Host `json:"host,omitempty"`
+}
+
+func (s *Server) hostViewsForUser(user auth.PublicUser, timeout time.Duration) []hostAccountView {
+	hosts := s.store.ListHostsWithTimeout(timeout)
+	trustedHosts := s.store.ListTrustedHostsForUser(user.ID)
+	trustedByHostID := make(map[string]remote.TrustedHost, len(trustedHosts))
+	for _, trusted := range trustedHosts {
+		trustedByHostID[strings.TrimSpace(trusted.HostID)] = trusted
+	}
+
+	out := make([]hostAccountView, 0, len(hosts))
+	for _, host := range hosts {
+		view := hostAccountView{Host: host}
+		if trusted, ok := trustedByHostID[strings.TrimSpace(host.ID)]; ok {
+			view.Trusted = true
+			trustedAt := trusted.TrustedAt
+			view.TrustedAt = &trustedAt
+			if !trusted.LastUsedAt.IsZero() {
+				lastUsedAt := trusted.LastUsedAt
+				view.TrustedLastUsedAt = &lastUsedAt
+			}
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
+func (s *Server) trustedHostViewsForUser(user auth.PublicUser, timeout time.Duration) []trustedHostAccountView {
+	trustedHosts := s.store.ListTrustedHostsForUser(user.ID)
+	hosts := s.store.ListHostsWithTimeout(timeout)
+	hostByID := make(map[string]remote.Host, len(hosts))
+	for _, host := range hosts {
+		hostByID[strings.TrimSpace(host.ID)] = host
+	}
+
+	out := make([]trustedHostAccountView, 0, len(trustedHosts))
+	for _, trusted := range trustedHosts {
+		view := trustedHostAccountView{TrustedHost: trusted}
+		if host, ok := hostByID[strings.TrimSpace(trusted.HostID)]; ok {
+			hostCopy := host
+			view.Host = &hostCopy
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
+func (s *Server) browserViewerPublicIDFromRequest(r *http.Request) string {
+	token := strings.TrimSpace(readCookieValue(r, browserTokenCookieName))
+	if !isValidInstallID(token) {
+		return ""
+	}
+	return remote.StablePublicID("host", token)
+}
+
+func (s *Server) handleAdminHosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hosts":                     s.hostViewsForUser(user, timeout),
+		"trusted_hosts":             s.trustedHostViewsForUser(user, timeout),
+		"heartbeat_timeout_seconds": s.cfg.Remote.HostHeartbeatSeconds,
+	})
+}
+
+func (s *Server) handleAdminTrustedHosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	writeJSON(w, http.StatusOK, map[string]any{
+		"trusted_hosts": s.trustedHostViewsForUser(user, timeout),
+	})
+}
+
+func (s *Server) handleAdminHostTrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req struct {
+		Target   string `json:"target"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	target := strings.TrimSpace(req.Target)
+	password := strings.TrimSpace(req.Password)
+	if target == "" || password == "" {
+		writeError(w, http.StatusBadRequest, "target and password are required")
+		return
+	}
+
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	host, ok := s.store.ValidateHostAccessPassword(target, password, timeout)
+	if !ok {
+		if _, available := s.store.FindHostByTarget(target, timeout); available {
+			writeError(w, http.StatusForbidden, "invalid host password")
+			return
+		}
+		writeError(w, http.StatusNotFound, "target host is offline or unavailable")
+		return
+	}
+
+	trusted, err := s.store.TrustHostForUser(user.ID, user.Email, host)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unable to trust host")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok":           true,
+		"host":         host,
+		"trusted_host": trusted,
+	})
+}
+
+func (s *Server) handleAdminHostsBulkTrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req struct {
+		Items []struct {
+			Target   string `json:"target"`
+			Password string `json:"password"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	results := make([]map[string]any, 0, len(req.Items))
+	for _, item := range req.Items {
+		target := strings.TrimSpace(item.Target)
+		password := strings.TrimSpace(item.Password)
+		result := map[string]any{"target": target}
+		if target == "" || password == "" {
+			result["ok"] = false
+			result["error"] = "target and password are required"
+			results = append(results, result)
+			continue
+		}
+		host, matched := s.store.ValidateHostAccessPassword(target, password, timeout)
+		if !matched {
+			if _, available := s.store.FindHostByTarget(target, timeout); available {
+				result["ok"] = false
+				result["error"] = "invalid host password"
+			} else {
+				result["ok"] = false
+				result["error"] = "target host is offline or unavailable"
+			}
+			results = append(results, result)
+			continue
+		}
+		trusted, err := s.store.TrustHostForUser(user.ID, user.Email, host)
+		if err != nil {
+			result["ok"] = false
+			result["error"] = "unable to trust host"
+			results = append(results, result)
+			continue
+		}
+		result["ok"] = true
+		result["host"] = host
+		result["trusted_host"] = trusted
+		results = append(results, result)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (s *Server) handleAdminHostUntrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req struct {
+		Target string `json:"target"`
+		HostID string `json:"host_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	target := strings.TrimSpace(req.HostID)
+	if target == "" {
+		target = strings.TrimSpace(req.Target)
+	}
+	if target == "" {
+		writeError(w, http.StatusBadRequest, "target or host_id is required")
+		return
+	}
+	if !s.store.UntrustHostForUser(user.ID, target) {
+		writeError(w, http.StatusNotFound, "trusted host not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAdminHostConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, ok := s.currentUserFromRequest(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req struct {
+		Target      string `json:"target"`
+		Viewer      string `json:"viewer"`
+		ViewerLabel string `json:"viewer_label,omitempty"`
+		Password    string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	target := strings.TrimSpace(req.Target)
+	viewer := strings.TrimSpace(req.Viewer)
+	password := strings.TrimSpace(req.Password)
+	if viewer == "" {
+		viewer = s.browserViewerPublicIDFromRequest(r)
+	}
+	if target == "" || viewer == "" {
+		writeError(w, http.StatusBadRequest, "target and viewer are required")
+		return
+	}
+
+	timeout := time.Duration(s.cfg.Remote.HostHeartbeatSeconds) * time.Second
+	var (
+		host              remote.Host
+		trusted           remote.TrustedHost
+		usedTrustedAccess bool
+	)
+	if password != "" {
+		matchedHost, matched := s.store.ValidateHostAccessPassword(target, password, timeout)
+		if !matched {
+			if _, available := s.store.FindHostByTarget(target, timeout); available {
+				writeError(w, http.StatusForbidden, "invalid host password")
+				return
+			}
+			writeError(w, http.StatusNotFound, "target host is offline or unavailable")
+			return
+		}
+		host = matchedHost
+		trusted, _ = s.store.TrustHostForUser(user.ID, user.Email, host)
+	} else {
+		matchedHost, matchedTrusted, matched := s.store.FindTrustedHostByTarget(user.ID, target, timeout)
+		if !matched {
+			if _, available := s.store.FindHostByTarget(target, timeout); available {
+				writeError(w, http.StatusForbidden, "host password required for the first trusted connection")
+				return
+			}
+			writeError(w, http.StatusNotFound, "target host is offline or unavailable")
+			return
+		}
+		host = matchedHost
+		trusted = matchedTrusted
+		usedTrustedAccess = true
+	}
+
+	createReq := remote.CreateSessionRequest{
+		Target:         target,
+		Viewer:         viewer,
+		ViewerLabel:    strings.TrimSpace(req.ViewerLabel),
+		ViewerAuthMode: "account",
+	}
+	session := s.store.CreateRouted(createReq, &host)
+	s.store.TouchTrustedHostUsage(user.ID, host.ID)
+	if refreshedTrusted, exists := s.store.TrustedHostForUser(user.ID, host.ID); exists {
+		trusted = refreshedTrusted
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":                  session.ID,
+		"session":             session,
+		"trusted_host":        trusted,
+		"used_trusted_access": usedTrustedAccess,
+	})
+}
+
 func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.provisioningUserFromRequest(r); !ok {
+		writeError(w, http.StatusUnauthorized, "provisioning credentials required")
+		return
+	}
+
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
@@ -854,7 +980,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 
 	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 	conn.SetPongHandler(func(string) error {
-		_, err := s.store.TouchHostState(host.ID, "", nil)
+		_, err := s.store.TouchHostState(host.ID, "", nil, "")
 		if err == nil {
 			_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
 		}
@@ -876,7 +1002,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			host, err = s.store.TouchHostState(host.ID, heartbeat.Role, heartbeat.AccessEnabled)
+			host, err = s.store.TouchHostState(host.ID, heartbeat.Role, heartbeat.AccessEnabled, heartbeat.AccessPassword)
 			if err != nil {
 				_ = liveConn.writeJSON(remote.HostWireMessage{Type: "error", Error: "unknown host"})
 				return
@@ -885,16 +1011,7 @@ func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
 			dispatches := make([]remote.HostSessionDispatch, 0, len(queuedSessions))
 			dispatchedIDs := make([]string, 0, len(queuedSessions))
 			for _, session := range queuedSessions {
-				dispatches = append(dispatches, remote.HostSessionDispatch{
-					ID:                 session.ID,
-					Target:             session.Target,
-					Viewer:             session.Viewer,
-					Status:             string(session.Status),
-					CreatedAt:          session.CreatedAt,
-					RoutedHostID:       session.RoutedHostID,
-					RoutedHostPublicID: session.RoutedHostPublicID,
-					RoutedHostname:     session.RoutedHostname,
-				})
+				dispatches = append(dispatches, sessionDispatchFromSession(session))
 				dispatchedIDs = append(dispatchedIDs, session.ID)
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
@@ -994,6 +1111,8 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch parts[1] {
+	case "reprompt":
+		s.handleSessionReprompt(w, r, id)
 	case "offer":
 		s.handleOffer(w, r, id)
 	case "answer":
@@ -1029,6 +1148,21 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request, id string) 
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
+	}
+	s.logger.Info(
+		"session offer received",
+		"session_id", session.ID,
+		"target", session.Target,
+		"viewer", session.Viewer,
+		"status", session.Status,
+		"dispatch_state", session.DispatchState,
+		"routed_host_id", session.RoutedHostID,
+		"routed_hostname", session.RoutedHostname,
+	)
+	if strings.TrimSpace(session.RoutedHostID) != "" {
+		s.dispatchSessionToConnectedHost(session, "offer")
+	} else {
+		s.logger.Warn("session offer has no routed host", "session_id", session.ID, "target", session.Target)
 	}
 	writeJSON(w, http.StatusOK, session)
 }
@@ -1125,6 +1259,38 @@ func (s *Server) handleScreenFrame(w http.ResponseWriter, r *http.Request, id st
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleSessionReprompt(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authorizeSessionViewer(r, id) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	session, err := s.store.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if strings.TrimSpace(session.RoutedHostID) == "" {
+		writeError(w, http.StatusConflict, "session has no routed host")
+		return
+	}
+	if session.Status == remote.StatusClosed || strings.EqualFold(strings.TrimSpace(session.DispatchState), "rejected") {
+		writeError(w, http.StatusConflict, "session is no longer waiting for approval")
+		return
+	}
+	if err := s.repromptSessionOnHost(session); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"session": session,
+	})
 }
 
 func (s *Server) handleScreenWS(w http.ResponseWriter, r *http.Request, id string) {
@@ -1443,6 +1609,104 @@ func (s *Server) clearHostConn(hostID string, conn *hostConn) {
 	delete(s.hostConns, hostID)
 }
 
+func sessionDispatchFromSession(session remote.Session) remote.HostSessionDispatch {
+	return remote.HostSessionDispatch{
+		ID:                 session.ID,
+		Target:             session.Target,
+		Viewer:             session.Viewer,
+		ViewerLabel:        session.ViewerLabel,
+		Status:             string(session.Status),
+		CreatedAt:          session.CreatedAt,
+		UpdatedAt:          session.UpdatedAt,
+		OfferDigest:        sessionOfferDigest(session),
+		RoutedHostID:       session.RoutedHostID,
+		RoutedHostPublicID: session.RoutedHostPublicID,
+		RoutedHostname:     session.RoutedHostname,
+	}
+}
+
+func sessionOfferDigest(session remote.Session) string {
+	offer := strings.TrimSpace(session.OfferSDP)
+	if offer == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(offer))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func (s *Server) dispatchSessionToConnectedHost(session remote.Session, reason string) {
+	hostID := strings.TrimSpace(session.RoutedHostID)
+	if hostID == "" {
+		return
+	}
+
+	s.hostMu.RLock()
+	hostConn := s.hostConns[hostID]
+	s.hostMu.RUnlock()
+	if hostConn == nil {
+		s.logger.Warn(
+			"session dispatch waiting for host connection",
+			"session_id", session.ID,
+			"host_id", hostID,
+			"reason", reason,
+			"dispatch_state", session.DispatchState,
+		)
+		return
+	}
+
+	if err := hostConn.writeJSON(remote.HostWireMessage{
+		Type:     "heartbeat_ack",
+		HostID:   hostID,
+		PublicID: session.RoutedHostPublicID,
+		Sessions: []remote.HostSessionDispatch{sessionDispatchFromSession(session)},
+	}); err != nil {
+		s.logger.Warn("session dispatch to host failed", "session_id", session.ID, "host_id", hostID, "reason", reason, "err", err)
+		hostConn.close()
+		return
+	}
+
+	s.store.MarkSessionsDispatched([]string{session.ID})
+	s.logger.Info(
+		"session dispatched to host",
+		"session_id", session.ID,
+		"host_id", hostID,
+		"reason", reason,
+		"dispatch_state", session.DispatchState,
+	)
+}
+
+func (s *Server) repromptSessionOnHost(session remote.Session) error {
+	hostID := strings.TrimSpace(session.RoutedHostID)
+	if hostID == "" {
+		return fmt.Errorf("session has no routed host")
+	}
+
+	s.hostMu.RLock()
+	hostConn := s.hostConns[hostID]
+	s.hostMu.RUnlock()
+	if hostConn == nil {
+		return fmt.Errorf("target host is offline or unavailable")
+	}
+
+	if err := hostConn.writeJSON(remote.HostWireMessage{
+		Type:     "approval_prompt",
+		HostID:   hostID,
+		PublicID: session.RoutedHostPublicID,
+		Sessions: []remote.HostSessionDispatch{sessionDispatchFromSession(session)},
+	}); err != nil {
+		hostConn.close()
+		return fmt.Errorf("unable to notify the host right now")
+	}
+
+	s.store.MarkSessionsDispatched([]string{session.ID})
+	s.logger.Info(
+		"session approval prompt re-sent to host",
+		"session_id", session.ID,
+		"host_id", hostID,
+	)
+	return nil
+}
+
 func (s *Server) addSessionEventViewer(sessionID string, conn *hostConn) {
 	s.eventMu.Lock()
 	defer s.eventMu.Unlock()
@@ -1589,7 +1853,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 			"font-src 'self' data:",
 			"style-src 'self'",
 			"script-src 'self'",
-			"connect-src 'self' ws: wss:",
+			"connect-src 'self' ws: wss: http://127.0.0.1:39091 http://localhost:39091",
 			"form-action 'self'",
 		}, "; "))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -1894,6 +2158,42 @@ func (s *Server) currentUserFromRequest(r *http.Request) (auth.PublicUser, bool)
 	return user, true
 }
 
+func (s *Server) accountOrBasicUserFromRequest(r *http.Request) (auth.PublicUser, bool) {
+	if user, ok := s.currentUserFromRequest(r); ok {
+		return user, true
+	}
+
+	email, password, ok := r.BasicAuth()
+	if !ok {
+		return auth.PublicUser{}, false
+	}
+	user, err := s.authStore.ValidateCredentials(email, password)
+	if err != nil {
+		return auth.PublicUser{}, false
+	}
+	return user, true
+}
+
+func (s *Server) provisioningUserFromRequest(r *http.Request) (auth.PublicUser, bool) {
+	if user, ok := s.accountOrBasicUserFromRequest(r); ok {
+		return user, true
+	}
+
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return auth.PublicUser{}, false
+	}
+	token := strings.TrimSpace(authHeader[len("Bearer "):])
+	if token == "" {
+		return auth.PublicUser{}, false
+	}
+	user, _, err := s.authStore.ValidateProvisionToken(token)
+	if err != nil {
+		return auth.PublicUser{}, false
+	}
+	return user, true
+}
+
 func (s *Server) authorizeSessionViewer(r *http.Request, sessionID string) bool {
 	if _, ok := s.currentUserFromRequest(r); ok {
 		return true
@@ -1928,6 +2228,14 @@ func readStandaloneViewerToken(r *http.Request) string {
 	return strings.TrimSpace(r.URL.Query().Get("standalone_token"))
 }
 
+func newStandaloneViewerToken() (string, error) {
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
 func isValidInstallID(value string) bool {
 	value = strings.TrimSpace(value)
 	if len(value) < 16 || len(value) > 128 {
@@ -1958,7 +2266,26 @@ func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+	forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+	if forwardedProto != "" {
+		for _, candidate := range strings.Split(forwardedProto, ",") {
+			if strings.EqualFold(strings.TrimSpace(candidate), "https") {
+				return true
+			}
+		}
+	}
+	for _, entry := range strings.Split(r.Header.Get("Forwarded"), ",") {
+		for _, part := range strings.Split(entry, ";") {
+			key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "proto") {
+				continue
+			}
+			if strings.EqualFold(strings.Trim(strings.TrimSpace(rawValue), `"`), "https") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isBrowserLikeRequest(r *http.Request) bool {

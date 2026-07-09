@@ -5,6 +5,28 @@
     "display_name": "UnyDesk Admin",
     "avatar": "S",
     "password_hash": "$2a$10$Fke3hvGoNZ1hD.0CY5VpAOfXIJ54KIC19uzULzSyR74zpjOfWKm6i",
+    "host_provision_tokens": [
+      {
+        "id": "4PZAfhIZ_fEqodGx",
+        "label": "TRINITY-NETBOOK · 736 237 092 · 0.1.0-alpha+20260703-bootstrap-tray-approval",
+        "install_id": "20e901b7c7f488eec5c54e725b03c62da9e699eb08178b52",
+        "public_id": "736 237 092",
+        "hostname": "TRINITY-NETBOOK",
+        "token_hash": "e34eac059545f76f4986a8f7458e3f61f841c32a95100856bba59c3de79e8da4",
+        "created_at": "2026-07-04T12:46:30.093429462Z",
+        "last_used_at": "2026-07-06T05:16:36.052278899Z"
+      },
+      {
+        "id": "HfjQCoYxBliwdZU0",
+        "label": "STOPYZ · 600 188 968 · 0.1.0-alpha+20260703-bootstrap-tray-approval",
+        "install_id": "d8b949930332c60431dba67379572d9db0f8fd6b3e8417ad",
+        "public_id": "600 188 968",
+        "hostname": "STOPYZ",
+        "token_hash": "44507b2d87d85b48615e2ede3e887f9160fb00b0feeded65de5813d8f88c1c5e",
+        "created_at": "2026-07-05T14:31:45.29772841Z",
+        "last_used_at": "2026-07-05T15:22:00.06108682Z"
+      }
+    ],
     "created_at": "2026-06-20T00:00:00Z"
   }
 ]

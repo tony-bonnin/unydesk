@@ -13,6 +13,7 @@ type hostUIStatus struct {
 	ServerURL       string `json:"server_url"`
 	InstallID       string `json:"install_id"`
 	PublicID        string `json:"public_id"`
+	AccessPassword  string `json:"access_password"`
 	HostID          string `json:"host_id"`
 	Role            string `json:"role"`
 	Admin           bool   `json:"admin"`
@@ -29,6 +30,7 @@ type hostUIStatus struct {
 	PendingViewer   string `json:"pending_viewer"`
 	LocalUIURL      string `json:"local_ui_url"`
 	Connected       bool   `json:"connected"`
+	Provisioned     bool   `json:"provisioned"`
 }
 
 type hostUILiveState struct {
@@ -43,7 +45,7 @@ var localHostUI = &hostUILiveState{
 	},
 }
 
-func (s *hostUILiveState) setBootstrap(info hostInfo, hostname, serverURL, installID string) {
+func (s *hostUILiveState) setBootstrap(info hostInfo, hostname, serverURL, installID, publicID, accessPassword string, provisioned bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.Name = info.Name
@@ -51,13 +53,32 @@ func (s *hostUILiveState) setBootstrap(info hostInfo, hostname, serverURL, insta
 	s.status.Hostname = strings.TrimSpace(hostname)
 	s.status.ServerURL = strings.TrimSpace(serverURL)
 	s.status.InstallID = strings.TrimSpace(installID)
+	s.status.PublicID = strings.TrimSpace(publicID)
+	s.status.AccessPassword = strings.TrimSpace(accessPassword)
 	s.status.AccountURL = linkedAccountURL(serverURL, installID, "")
 	s.status.Role = "Host"
 	s.status.Admin = processHasAdminRights()
 	s.status.AccessEnabled = true
 	s.status.AccessState = "Enabled"
-	s.status.ConnectionState = "Connecting"
-	s.status.ConnectionNote = "Opening outbound WebSocket transport."
+	s.status.Provisioned = provisioned
+	if strings.TrimSpace(serverURL) == "" {
+		s.status.ConnectionState = "Link required"
+		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet. Open the web workspace on this machine to claim the host."
+		return
+	}
+	if provisioned {
+		s.status.ConnectionState = "Connecting"
+		s.status.ConnectionNote = "Provisioning token loaded. Connecting to the broker."
+		return
+	}
+	s.status.ConnectionState = "Provisioning required"
+	s.status.ConnectionNote = "The server route is known, but this host still needs a provisioning claim before it can connect to the broker."
+}
+
+func (s *hostUILiveState) setAccessPassword(value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.AccessPassword = strings.TrimSpace(value)
 }
 
 func (s *hostUILiveState) setLocalUIURL(value string) {
@@ -78,6 +99,7 @@ func (s *hostUILiveState) setConnected(identity hostIdentity, accountURL string)
 	s.status.ConnectionNote = connectedHostNote(s.status.AccessEnabled)
 	s.status.LastError = ""
 	s.status.Connected = true
+	s.status.Provisioned = true
 }
 
 func (s *hostUILiveState) noteHeartbeat() {
@@ -103,7 +125,7 @@ func (s *hostUILiveState) noteSession(session hostSessionDispatch) {
 	defer s.mu.Unlock()
 	s.status.LastSessionID = strings.TrimSpace(session.ID)
 	target := strings.TrimSpace(session.Target)
-	viewer := strings.TrimSpace(session.Viewer)
+	viewer := sessionViewerDisplayName(session)
 	if target == "" && viewer == "" {
 		s.status.LastSessionMeta = ""
 		return
@@ -122,13 +144,21 @@ func (s *hostUILiveState) noteApprovalRequested(session hostSessionDispatch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.PendingApproval = true
-	s.status.PendingViewer = strings.TrimSpace(session.Viewer)
+	s.status.PendingViewer = sessionViewerDisplayName(session)
 	s.status.ConnectionState = "Approval needed"
 	if s.status.PendingViewer != "" {
 		s.status.ConnectionNote = "Waiting for local approval for " + s.status.PendingViewer + "."
 	} else {
 		s.status.ConnectionNote = "Waiting for local approval for the current remote access request."
 	}
+}
+
+func sessionViewerDisplayName(session hostSessionDispatch) string {
+	label := strings.TrimSpace(session.ViewerLabel)
+	if label != "" {
+		return label
+	}
+	return strings.TrimSpace(session.Viewer)
 }
 
 func (s *hostUILiveState) clearApprovalRequest() {
@@ -160,6 +190,67 @@ func (s *hostUILiveState) setDisconnected(err error, reconnectDelay time.Duratio
 	if err != nil {
 		s.status.LastError = strings.TrimSpace(err.Error())
 	}
+}
+
+func (s *hostUILiveState) setAwaitingProvisioning(serverURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.ServerURL = strings.TrimSpace(serverURL)
+	s.status.Connected = false
+	s.status.Provisioned = false
+	s.status.PendingApproval = false
+	s.status.PendingViewer = ""
+	if strings.TrimSpace(serverURL) == "" {
+		s.status.ConnectionState = "Link required"
+		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet. Open the web workspace on this machine to claim the host."
+		return
+	}
+	s.status.ConnectionState = "Provisioning required"
+	s.status.ConnectionNote = "The server route is known, but the host still needs an explicit provisioning claim before registration starts."
+}
+
+func (s *hostUILiveState) setProvisioned(serverURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.ServerURL = strings.TrimSpace(serverURL)
+	s.status.Provisioned = true
+	s.status.Connected = false
+	s.status.PendingApproval = false
+	s.status.PendingViewer = ""
+	s.status.ConnectionState = "Connecting"
+	s.status.ConnectionNote = "Provisioning token stored locally. Connecting to the broker."
+	s.status.LastError = ""
+}
+
+func (s *hostUILiveState) applyBootstrapClaim(serverURL, installID, publicID string, provisioned bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(serverURL) != "" {
+		s.status.ServerURL = strings.TrimSpace(serverURL)
+	}
+	if strings.TrimSpace(installID) != "" {
+		s.status.InstallID = strings.TrimSpace(installID)
+	}
+	if strings.TrimSpace(publicID) != "" {
+		s.status.PublicID = strings.TrimSpace(publicID)
+	}
+	s.status.Provisioned = provisioned
+	s.status.Connected = false
+	s.status.PendingApproval = false
+	s.status.PendingViewer = ""
+	if provisioned {
+		s.status.ConnectionState = "Connecting"
+		s.status.ConnectionNote = "Claim accepted. Connecting to the broker."
+		s.status.LastError = ""
+		return
+	}
+	if strings.TrimSpace(s.status.ServerURL) == "" {
+		s.status.ConnectionState = "Link required"
+		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet."
+		return
+	}
+	s.status.ConnectionState = "Provisioning required"
+	s.status.ConnectionNote = "Server route stored locally. Waiting for provisioning credentials."
 }
 
 func (s *hostUILiveState) setAccessEnabled(enabled bool) {

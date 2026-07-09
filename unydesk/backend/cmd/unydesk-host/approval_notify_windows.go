@@ -3,29 +3,41 @@
 package main
 
 import (
-	"fmt"
 	"strings"
+
+	"github.com/lxn/win"
 )
 
+func pendingHostApprovalUIVisible() bool {
+	return hostPanelWindowHandle != 0 && win.IsWindowVisible(hostPanelWindowHandle)
+}
+
 func notifyPendingHostApproval(session hostSessionDispatch) {
-	viewer := strings.TrimSpace(session.Viewer)
-	if viewer == "" {
-		viewer = "a client"
+	if !showLocalHostPanel() {
+		viewer := strings.TrimSpace(session.Viewer)
+		if viewer == "" {
+			viewer = hostText("viewer.a_client")
+		}
+		showLocalHostTrayNotification(hostText("notif.request_title"), hostTextf("notif.request_message", viewer))
 	}
-	message := fmt.Sprintf("Remote access request from %s. Right-click the UnyDesk tray icon to Allow or Deny.", viewer)
-	showLocalHostTrayNotification("Remote access request", message)
 	updateLocalHostTrayTip()
+}
+
+func dismissPendingHostApprovalUI() {
+	if hostPanelWindowHandle != 0 {
+		win.ShowWindow(hostPanelWindowHandle, win.SW_HIDE)
+	}
 }
 
 func notifyResolvedHostApproval(session hostSessionDispatch, allow bool) {
 	viewer := strings.TrimSpace(session.Viewer)
 	if viewer == "" {
-		viewer = "Remote client"
+		viewer = hostText("viewer.remote_client")
 	}
 	if allow {
-		showLocalHostTrayNotification("Remote access allowed", viewer+" can now control this host.")
+		showLocalHostTrayNotification(hostText("notif.allowed_title"), hostTextf("notif.allowed_message", viewer))
 	} else {
-		showLocalHostTrayNotification("Remote access denied", viewer+" was denied for this host.")
+		showLocalHostTrayNotification(hostText("notif.denied_title"), hostTextf("notif.denied_message", viewer))
 	}
 	updateLocalHostTrayTip()
 }

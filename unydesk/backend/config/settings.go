@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -18,9 +19,11 @@ var defaultICEServers = []ICEServer{
 type Settings struct {
 	Name       string        `yaml:"name"`
 	ListenAddr string        `yaml:"listen_addr"`
+	ServerURL  string        `yaml:"server_url"`
 	Security   Security      `yaml:"security"`
 	Remote     RemoteRuntime `yaml:"remote"`
 	WebRTC     WebRTC        `yaml:"webrtc"`
+	HTTP3      HTTP3         `yaml:"http3"`
 	Features   Features      `yaml:"features"`
 	Paths      Paths         `yaml:"paths"`
 }
@@ -55,11 +58,21 @@ type Features struct {
 	configured           bool     `yaml:"-" json:"-"`
 }
 
+type HTTP3 struct {
+	Enabled      bool   `yaml:"enabled"`
+	CertFile     string `yaml:"cert_file"`
+	KeyFile      string `yaml:"key_file"`
+	Port         int    `yaml:"port"`
+	RedirectHTTP bool   `yaml:"redirect_http"`
+}
+
 type Paths struct {
 	PublicIDFile     string `yaml:"public_id_file"`
 	HostDownloadsDir string `yaml:"host_downloads_dir"`
 	FrontendDir      string `yaml:"frontend_dir"`
 	UsersFile        string `yaml:"users_file"`
+	HostsFile        string `yaml:"hosts_file"`
+	TrustedHostsFile string `yaml:"trusted_hosts_file"`
 }
 
 func Load(path string) (Settings, error) {
@@ -84,6 +97,7 @@ func applyDefaults(cfg *Settings) {
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = ":8890"
 	}
+	applyServerURLEnv(cfg)
 	if cfg.Security.AllowOrigin == "" {
 		cfg.Security.AllowOrigin = "*"
 	}
@@ -105,15 +119,35 @@ func applyDefaults(cfg *Settings) {
 	if cfg.Paths.UsersFile == "" {
 		cfg.Paths.UsersFile = "settings/users.json"
 	}
+	if cfg.Paths.HostsFile == "" {
+		cfg.Paths.HostsFile = "settings/hosts.json"
+	}
+	if cfg.Paths.TrustedHostsFile == "" {
+		cfg.Paths.TrustedHostsFile = "settings/trusted-hosts.json"
+	}
 	if assetsDir := os.Getenv("UNYDESK_ASSETS"); assetsDir != "" {
 		cfg.Paths.FrontendDir = assetsDir
 	}
+	applyHTTP3Env(cfg)
 	applyWebRTCEnv(cfg)
 	cfg.WebRTC.ICEServers = normalizeICEServers(cfg.WebRTC.ICEServers)
 	if len(cfg.WebRTC.ICEServers) == 0 && !envBool("UNYDESK_DISABLE_DEFAULT_STUN", false) {
 		cfg.WebRTC.ICEServers = cloneICEServers(defaultICEServers)
 	}
 	applyFeatureDefaults(cfg)
+	if cfg.HTTP3.Port <= 0 {
+		cfg.HTTP3.Port = 8443
+	}
+}
+
+func applyServerURLEnv(cfg *Settings) {
+	for _, name := range []string{"UNYDESK_SERVER_URL", "SERVER_URL", "UNYDESK_PUBLIC_SERVER"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			cfg.ServerURL = value
+			return
+		}
+	}
+	cfg.ServerURL = strings.TrimSpace(cfg.ServerURL)
 }
 
 func applyWebRTCEnv(cfg *Settings) {
@@ -140,6 +174,23 @@ func applyWebRTCEnv(cfg *Settings) {
 		})
 	}
 	cfg.WebRTC.ICEServers = servers
+}
+
+func applyHTTP3Env(cfg *Settings) {
+	cfg.HTTP3.Enabled = envBool("UNYDESK_HTTP3_ENABLED", cfg.HTTP3.Enabled)
+
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_HTTP3_CERT_FILE")); value != "" {
+		cfg.HTTP3.CertFile = value
+	}
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_HTTP3_KEY_FILE")); value != "" {
+		cfg.HTTP3.KeyFile = value
+	}
+	if value := strings.TrimSpace(os.Getenv("UNYDESK_HTTP3_PORT")); value != "" {
+		if port, err := strconv.Atoi(value); err == nil && port > 0 {
+			cfg.HTTP3.Port = port
+		}
+	}
+	cfg.HTTP3.RedirectHTTP = envBool("UNYDESK_HTTP3_REDIRECT_HTTP", cfg.HTTP3.RedirectHTTP)
 }
 
 func applyFeatureDefaults(cfg *Settings) {
