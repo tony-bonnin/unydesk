@@ -61,6 +61,13 @@ func waitForBootstrapUpdate(ctx context.Context) bool {
 	}
 }
 
+func triggerBootstrapWake() {
+	select {
+	case bootstrapRuntimeWake <- struct{}{}:
+	default:
+	}
+}
+
 func updateBootstrapProvisioning(serverURL, domain, installID, publicID, credential, credentialType string) error {
 	cfg := currentBootstrapRuntime()
 	if strings.TrimSpace(serverURL) != "" {
@@ -89,10 +96,7 @@ func updateBootstrapProvisioning(serverURL, domain, installID, publicID, credent
 	}
 
 	setBootstrapRuntime(cfg, resolvedPath)
-	select {
-	case bootstrapRuntimeWake <- struct{}{}:
-	default:
-	}
+	triggerBootstrapWake()
 	return nil
 }
 
@@ -122,12 +126,7 @@ func updateBootstrapRouting(serverURL, domain, installID, publicID string) error
 	}
 
 	setBootstrapRuntime(cfg, resolvedPath)
-	if strings.TrimSpace(resolveServerCredential(cfg)) != "" {
-		select {
-		case bootstrapRuntimeWake <- struct{}{}:
-		default:
-		}
-	}
+	triggerBootstrapWake()
 	return nil
 }
 

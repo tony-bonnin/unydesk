@@ -235,10 +235,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	serverURL := strings.TrimSpace(s.cfg.ServerURL)
+	if serverURL == "" {
+		serverURL = requestBaseServerURL(r)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":                   s.cfg.Name,
 		"version":                config.Version,
 		"listen_addr":            s.cfg.ListenAddr,
+		"server_url":             serverURL,
 		"host_ipv4":              resolveRequestHostIPv4(r),
 		"client_ipv4":            resolveRequestClientIPv4(r),
 		"allow_origin":           s.cfg.Security.AllowOrigin,
@@ -592,10 +597,6 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 			"heartbeat_timeout_seconds": s.cfg.Remote.HostHeartbeatSeconds,
 		})
 	case http.MethodPost:
-		if _, ok := s.provisioningUserFromRequest(r); !ok {
-			writeError(w, http.StatusUnauthorized, "provisioning credentials required")
-			return
-		}
 		var req remote.RegisterHostRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json body")
@@ -935,11 +936,6 @@ func (s *Server) handleAdminHostConnect(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleHostsWS(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.provisioningUserFromRequest(r); !ok {
-		writeError(w, http.StatusUnauthorized, "provisioning credentials required")
-		return
-	}
-
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
@@ -1977,7 +1973,7 @@ func (s *Server) registerDiskFrontend(mux *http.ServeMux, frontendDir string) {
 		}
 	}
 
-	for _, name := range []string{"app.js", "styles.css", "favicon.ico", "robots.txt", "manifest.json"} {
+	for _, name := range []string{"app.js", "styles.css", "favicon.ico", "robots.txt", "sitemap.xml", "manifest.json"} {
 		filePath := filepath.Join(frontendDir, name)
 		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
 			path := "/" + name

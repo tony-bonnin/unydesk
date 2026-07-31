@@ -32,5 +32,22 @@
     "registered_at": "2026-07-05T14:31:45.369102251Z",
     "last_seen_at": "2026-07-05T17:24:22.353182267Z",
     "password_seen_at": "2026-07-05T17:24:22.353181351Z"
+  },
+  {
+    "id": "ecdf9fea73aca034",
+    "install_id": "9c089f7c8b28790f60b3a2d29bc0aef2ad96edef57b3a1dd",
+    "role": "host",
+    "access_enabled": true,
+    "access_mode": "password",
+    "name": "UnyDesk Host",
+    "os": "windows",
+    "arch": "amd64",
+    "version": "0.1.0-alpha+20260711-route-wake",
+    "hostname": "DESKTOP-RET6DCA",
+    "public_id": "639 452 026",
+    "status": "online",
+    "registered_at": "2026-07-11T17:53:28.769769557Z",
+    "last_seen_at": "2026-07-11T23:31:23.150425458Z",
+    "password_seen_at": "2026-07-11T23:31:23.150425458Z"
   }
 ]

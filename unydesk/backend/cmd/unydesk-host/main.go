@@ -29,7 +29,7 @@ import (
 var defaultServerURL = ""
 var defaultInstallID = ""
 
-const hostBuildID = "20260703-bootstrap-tray-approval"
+const hostBuildID = "20260711-route-wake"
 
 type hostInfo struct {
 	Name    string `json:"name"`
@@ -540,13 +540,9 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 		currentRuntime := currentBootstrapRuntime()
 		currentServerURL, _ := resolveServerURL("", currentRuntime)
 		currentCredential := strings.TrimSpace(currentRuntimeServerCredential())
-		if strings.TrimSpace(currentServerURL) == "" || currentCredential == "" {
+		if strings.TrimSpace(currentServerURL) == "" {
 			localHostUI.setAwaitingProvisioning(currentServerURL)
-			if strings.TrimSpace(currentServerURL) == "" {
-				fmt.Println("Bootstrap: waiting for a server route from the web bootstrap API.")
-			} else {
-				fmt.Println("Bootstrap: waiting for explicit provisioning credentials before registering this host.")
-			}
+			fmt.Println("Bootstrap: waiting for a server route from the web bootstrap API.")
 			if !waitForBootstrapUpdate(ctx) {
 				return nil
 			}
@@ -563,7 +559,7 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 			continue
 		}
 
-		localHostUI.setProvisioned(currentServerURL)
+		localHostUI.setConnecting(currentServerURL, currentCredential != "")
 		err = connectAndServe(ctx, wsURL, currentServerURL, currentCredential, hostname, info, &identity)
 		if ctx.Err() != nil {
 			return nil
@@ -577,6 +573,9 @@ func runPersistentHost(ctx context.Context, shutdown context.CancelFunc, serverU
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-bootstrapRuntimeWake:
+			backoff = 2 * time.Second
+			continue
 		case <-time.After(backoff):
 		}
 
@@ -715,17 +714,28 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, serverCredential, ho
 			incomingOfferDigest := strings.TrimSpace(session.OfferDigest)
 			currentOfferDigest := strings.TrimSpace(worker.offerDigest)
 			if incomingOfferDigest == "" || currentOfferDigest == "" || incomingOfferDigest == currentOfferDigest {
-				activeMu.Unlock()
-				if currentOfferDigest != "" {
-					fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; offer digest %s is already active\n", sessionID, currentOfferDigest)
-				} else {
-					fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; worker is already active\n", sessionID)
+				workerAge := time.Since(worker.startedAt)
+				if workerAge < 4*time.Second {
+					activeMu.Unlock()
+					if currentOfferDigest != "" {
+						fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; offer digest %s is already active for %s\n", sessionID, currentOfferDigest, workerAge.Round(time.Millisecond))
+					} else {
+						fmt.Printf("Realtime : session %s duplicate offered dispatch ignored; worker is already active for %s\n", sessionID, workerAge.Round(time.Millisecond))
+					}
+					return
 				}
-				return
+				close(worker.stop)
+				delete(activeSessions, sessionID)
+				if currentOfferDigest != "" {
+					fmt.Printf("Realtime : session %s offered dispatch repeated without answer after %s; restarting stalled WebRTC worker for digest %s\n", sessionID, workerAge.Round(time.Millisecond), currentOfferDigest)
+				} else {
+					fmt.Printf("Realtime : session %s offered dispatch repeated without answer after %s; restarting stalled WebRTC worker\n", sessionID, workerAge.Round(time.Millisecond))
+				}
+			} else {
+				close(worker.stop)
+				delete(activeSessions, sessionID)
+				fmt.Printf("Realtime : session %s received a fresh offer; restarting WebRTC worker after %s (%s -> %s)\n", sessionID, time.Since(worker.startedAt).Round(time.Millisecond), currentOfferDigest, incomingOfferDigest)
 			}
-			close(worker.stop)
-			delete(activeSessions, sessionID)
-			fmt.Printf("Realtime : session %s received a fresh offer; restarting WebRTC worker after %s (%s -> %s)\n", sessionID, time.Since(worker.startedAt).Round(time.Millisecond), currentOfferDigest, incomingOfferDigest)
 		}
 		stop := make(chan struct{})
 		activeSessions[sessionID] = activeSessionWorker{stop: stop, startedAt: time.Now(), sessionUpdatedAt: session.UpdatedAt, offerDigest: strings.TrimSpace(session.OfferDigest)}
@@ -752,7 +762,7 @@ func connectAndServe(ctx context.Context, wsURL, serverURL, serverCredential, ho
 				}
 				activeMu.Unlock()
 			}()
-			runWebRTCSession(ctx, stop, sessionURL, sessionID, runtimeCfg, emitServerEvent, func(handler func(string)) {
+			runWebRTCSession(ctx, stop, serverURL, registered.ID, sessionURL, sessionID, runtimeCfg, emitServerEvent, func(handler func(string)) {
 				activeMu.Lock()
 				defer activeMu.Unlock()
 				current, ok := activeSessions[sessionID]

@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /account
+Disallow: /connect
+
+Sitemap: https://unydesk.app/sitemap.xml

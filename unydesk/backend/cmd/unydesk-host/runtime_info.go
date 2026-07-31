@@ -147,7 +147,7 @@ func normalizeRuntimeFeatures(wire runtimeFeatureWire, webRTCEnabled *bool, pref
 		features.PreferredVideoCodecs = preferred
 	}
 	if len(features.PreferredVideoCodecs) == 0 {
-		features.PreferredVideoCodecs = []string{"h264", "h265", "av1"}
+		features.PreferredVideoCodecs = []string{"h264", "av1", "h265"}
 	}
 	features.PreferredVideoCodecs = normalizeRuntimeVideoCodecs(features.PreferredVideoCodecs, features)
 	return features

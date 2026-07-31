@@ -201,7 +201,7 @@ func applyFeatureDefaults(cfg *Settings) {
 			H264:                 true,
 			AV1:                  true,
 			QUIC:                 true,
-			PreferredVideoCodecs: []string{"h264", "h265", "av1"},
+			PreferredVideoCodecs: []string{"h264", "av1", "h265"},
 		}
 	}
 
@@ -216,7 +216,7 @@ func applyFeatureDefaults(cfg *Settings) {
 		codecs = cfg.Features.PreferredVideoCodecs
 	}
 	if len(codecs) == 0 {
-		codecs = []string{"h264", "h265", "av1"}
+		codecs = []string{"h264", "av1", "h265"}
 	}
 	cfg.Features.PreferredVideoCodecs = normalizeVideoCodecs(codecs, cfg.Features)
 }

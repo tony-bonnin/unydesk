@@ -19,11 +19,8 @@ var hostApprovalState struct {
 	dismissedKey   string
 }
 
-const hostApprovalReuseWindow = 45 * time.Second
-
 func recentHostApprovalKey(session hostSessionDispatch) string {
 	parts := []string{
-		strings.TrimSpace(session.ID),
 		strings.TrimSpace(session.Viewer),
 		strings.TrimSpace(session.Target),
 		strings.TrimSpace(session.RoutedHostID),
@@ -35,19 +32,8 @@ func recentHostApprovalKey(session hostSessionDispatch) string {
 func hasCachedApprovedHostAccess(session hostSessionDispatch) bool {
 	hostApprovalState.mu.Lock()
 	defer hostApprovalState.mu.Unlock()
-
-	now := time.Now().UTC()
-	for key, approvedAt := range hostApprovalState.recentApproved {
-		if now.Sub(approvedAt) > hostApprovalReuseWindow {
-			delete(hostApprovalState.recentApproved, key)
-		}
-	}
-
-	approvedAt, ok := hostApprovalState.recentApproved[recentHostApprovalKey(session)]
-	if !ok {
-		return false
-	}
-	return now.Sub(approvedAt) <= hostApprovalReuseWindow
+	_, ok := hostApprovalState.recentApproved[recentHostApprovalKey(session)]
+	return ok
 }
 
 func rememberApprovedHostAccess(session hostSessionDispatch) {
@@ -60,13 +46,17 @@ func rememberApprovedHostAccess(session hostSessionDispatch) {
 	if hostApprovalState.recentApproved == nil {
 		hostApprovalState.recentApproved = make(map[string]time.Time)
 	}
-	now := time.Now().UTC()
-	hostApprovalState.recentApproved[key] = now
-	for existingKey, approvedAt := range hostApprovalState.recentApproved {
-		if now.Sub(approvedAt) > hostApprovalReuseWindow {
-			delete(hostApprovalState.recentApproved, existingKey)
-		}
+	hostApprovalState.recentApproved[key] = time.Now().UTC()
+}
+
+func forgetApprovedHostAccess(session hostSessionDispatch) {
+	key := recentHostApprovalKey(session)
+	if key == "" {
+		return
 	}
+	hostApprovalState.mu.Lock()
+	defer hostApprovalState.mu.Unlock()
+	delete(hostApprovalState.recentApproved, key)
 }
 
 func queuePendingHostApproval(session hostSessionDispatch, decide func(action string)) bool {
@@ -160,6 +150,8 @@ func resolvePendingHostApproval(allow bool) bool {
 	if allow {
 		action = "accept"
 		rememberApprovedHostAccess(pending.session)
+	} else {
+		forgetApprovedHostAccess(pending.session)
 	}
 	dismissPendingHostApprovalUI()
 	notifyResolvedHostApproval(pending.session, allow)

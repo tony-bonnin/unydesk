@@ -10,5 +10,17 @@
     "name": "UnyDesk Host",
     "trusted_at": "2026-07-03T18:45:15.198836726Z",
     "last_used_at": "2026-07-04T22:18:48.58526455Z"
+  },
+  {
+    "id": "0575c4058b901b32",
+    "user_id": "admin-local-001",
+    "user_email": "admin@unydesk.local",
+    "host_id": "ecdf9fea73aca034",
+    "host_public_id": "639 452 026",
+    "host_install_id": "9c089f7c8b28790f60b3a2d29bc0aef2ad96edef57b3a1dd",
+    "hostname": "DESKTOP-RET6DCA",
+    "name": "UnyDesk Host",
+    "trusted_at": "2026-07-11T23:03:52.874779661Z",
+    "last_used_at": "2026-07-11T23:25:50.105636224Z"
   }
 ]

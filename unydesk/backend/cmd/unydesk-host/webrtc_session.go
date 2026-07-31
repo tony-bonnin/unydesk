@@ -66,13 +66,13 @@ func (c *sessionChannels) anyOpenEventChannel() *webrtc.DataChannel {
 	return nil
 }
 
-func runWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) {
-	if err := serveWebRTCSession(ctx, done, sessionURL, sessionID, runtimeCfg, emitServerEvent, registerFallbackHandler); err != nil && ctx.Err() == nil {
+func runWebRTCSession(ctx context.Context, done <-chan struct{}, serverURL, hostID, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) {
+	if err := serveWebRTCSession(ctx, done, serverURL, hostID, sessionURL, sessionID, runtimeCfg, emitServerEvent, registerFallbackHandler); err != nil && ctx.Err() == nil {
 		fmt.Printf("Host WebRTC session error for %s: %v\n", sessionID, err)
 	}
 }
 
-func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) error {
+func serveWebRTCSession(ctx context.Context, done <-chan struct{}, serverURL, hostID, sessionURL, sessionID string, runtimeCfg runtimeConfig, emitServerEvent func(string, map[string]any), registerFallbackHandler func(func(string))) error {
 	sessionStartedAt := time.Now()
 	peerICEServers := toPeerICEServers(runtimeCfg.ICEServers)
 	fmt.Printf("WebRTC ICE servers for %s: %d configured\n", sessionID, len(peerICEServers))
@@ -282,6 +282,7 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 	})
 
 	var startScreenDataChannel func(reason string)
+	var startScreenWebSocketFallback func(reason string)
 	var screenChannel *webrtc.DataChannel
 	startRealtimeVideo = func(trigger string) {
 		video := getVideoTrack()
@@ -465,6 +466,26 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 			})
 		})
 	}
+	startScreenWebSocketFallback = func(reason string) {
+		if !screenStarted.CompareAndSwap(false, true) {
+			return
+		}
+		screenWSURL, err := toScreenWebSocketURL(serverURL, sessionID, hostID)
+		if err != nil {
+			fmt.Printf("WebRTC screen websocket fallback unavailable for %s: %v\n", sessionID, err)
+			emitEvent(sessionID, map[string]any{
+				"type":      "screen_status",
+				"transport": "peer-frame",
+				"action":    "fallback-unavailable",
+				"reason":    err.Error(),
+			})
+			return
+		}
+		if reason != "" {
+			fmt.Printf("WebRTC screen websocket fallback for %s: %s\n", sessionID, reason)
+		}
+		go streamScreenFrames(ctx, done, sessionURL, screenWSURL, sessionID)
+	}
 	requestScreenFallback = func(reason string) {
 		videoFailed.Store(true)
 		cancelActiveVideo()
@@ -480,7 +501,9 @@ func serveWebRTCSession(ctx context.Context, done <-chan struct{}, sessionURL, s
 		})
 		if screenChannel.ReadyState() == webrtc.DataChannelStateOpen {
 			startScreenDataChannel(reason)
+			return
 		}
+		startScreenWebSocketFallback(reason)
 	}
 	if registerFallbackHandler != nil {
 		registerFallbackHandler(requestScreenFallback)

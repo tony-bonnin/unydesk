@@ -63,7 +63,7 @@ func (s *hostUILiveState) setBootstrap(info hostInfo, hostname, serverURL, insta
 	s.status.Provisioned = provisioned
 	if strings.TrimSpace(serverURL) == "" {
 		s.status.ConnectionState = "Link required"
-		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet. Open the web workspace on this machine to claim the host."
+		s.status.ConnectionNote = "Local host ID and password are ready, but no server route is configured yet. Open the UnyDesk site on this machine so the loopback API can store the server route."
 		return
 	}
 	if provisioned {
@@ -71,8 +71,8 @@ func (s *hostUILiveState) setBootstrap(info hostInfo, hostname, serverURL, insta
 		s.status.ConnectionNote = "Provisioning token loaded. Connecting to the broker."
 		return
 	}
-	s.status.ConnectionState = "Provisioning required"
-	s.status.ConnectionNote = "The server route is known, but this host still needs a provisioning claim before it can connect to the broker."
+	s.status.ConnectionState = "Connecting"
+	s.status.ConnectionNote = "Server route stored locally. Connecting to the broker."
 }
 
 func (s *hostUILiveState) setAccessPassword(value string) {
@@ -205,20 +205,24 @@ func (s *hostUILiveState) setAwaitingProvisioning(serverURL string) {
 		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet. Open the web workspace on this machine to claim the host."
 		return
 	}
-	s.status.ConnectionState = "Provisioning required"
-	s.status.ConnectionNote = "The server route is known, but the host still needs an explicit provisioning claim before registration starts."
+	s.status.ConnectionState = "Connecting"
+	s.status.ConnectionNote = "Server route stored locally. Connecting to the broker."
 }
 
-func (s *hostUILiveState) setProvisioned(serverURL string) {
+func (s *hostUILiveState) setConnecting(serverURL string, provisioned bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status.ServerURL = strings.TrimSpace(serverURL)
-	s.status.Provisioned = true
+	s.status.Provisioned = provisioned
 	s.status.Connected = false
 	s.status.PendingApproval = false
 	s.status.PendingViewer = ""
 	s.status.ConnectionState = "Connecting"
-	s.status.ConnectionNote = "Provisioning token stored locally. Connecting to the broker."
+	if provisioned {
+		s.status.ConnectionNote = "Provisioning token stored locally. Connecting to the broker."
+	} else {
+		s.status.ConnectionNote = "Server route stored locally. Connecting to the broker."
+	}
 	s.status.LastError = ""
 }
 
@@ -246,11 +250,11 @@ func (s *hostUILiveState) applyBootstrapClaim(serverURL, installID, publicID str
 	}
 	if strings.TrimSpace(s.status.ServerURL) == "" {
 		s.status.ConnectionState = "Link required"
-		s.status.ConnectionNote = "Local host ID and password are ready, but this machine is not linked to a web workspace yet."
+		s.status.ConnectionNote = "Local host ID and password are ready, but no server route is configured yet."
 		return
 	}
-	s.status.ConnectionState = "Provisioning required"
-	s.status.ConnectionNote = "Server route stored locally. Waiting for provisioning credentials."
+	s.status.ConnectionState = "Connecting"
+	s.status.ConnectionNote = "Server route stored locally. Connecting to the broker."
 }
 
 func (s *hostUILiveState) setAccessEnabled(enabled bool) {

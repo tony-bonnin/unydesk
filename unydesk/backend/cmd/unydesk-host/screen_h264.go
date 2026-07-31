@@ -107,6 +107,13 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 	capture := defaultCaptureProvider()
 	profileIndex := h264InitialProfileIndex(profiles)
 	floorOverloads := 0
+	firstFrameSent := false
+	markFirstRealtimeFrame := func() {
+		firstFrameSent = true
+		if markFirstSample != nil {
+			markFirstSample()
+		}
+	}
 	emitProfileStatus := func(action string, profile h264AdaptiveProfile, network *h264NetworkSnapshot) {
 		if emitStatus == nil {
 			return
@@ -147,7 +154,7 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 		profile := profiles[profileIndex]
 		pipeline := newScreenPipelineWithCapture(profile.screenPipelineProfile(), capture)
 		emitProfileStatus("profile", profile, nil)
-		err := runH264EncoderSession(ctx, done, sessionID, ffmpegPath, pipeline, track, networkMonitor, profile, emitStatus, markFirstSample)
+		err := runH264EncoderSession(ctx, done, sessionID, ffmpegPath, pipeline, track, networkMonitor, profile, emitStatus, markFirstRealtimeFrame)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
@@ -155,6 +162,11 @@ func streamScreenH264ToTrack(ctx context.Context, done <-chan struct{}, sessionI
 		case <-done:
 			return
 		default:
+		}
+		if firstFrameSent && (errors.Is(err, errH264EncoderOverloaded) || errors.Is(err, errH264NetworkCongested) || errors.Is(err, errH264StableUpgrade)) {
+			fmt.Printf("H264 adaptive restart suppressed for %s after first frame: profile=%s err=%v\n", sessionID, profile.Name, err)
+			emitError("H.264 session ended after adaptive restart was suppressed; keeping current quality policy stable.")
+			return
 		}
 		if errors.Is(err, errH264ResolutionChanged) {
 			fmt.Printf("H264 screen restarting for %s after resolution change\n", sessionID)

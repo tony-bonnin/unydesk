@@ -24,7 +24,7 @@ func newPreferredScreenVideoTrack(pc *webrtc.PeerConnection, sessionID, offerSDP
 		codecs = features.PreferredVideoCodecs
 	}
 	if len(codecs) == 0 {
-		codecs = []string{"h264", "h265", "av1"}
+		codecs = []string{"h264", "av1", "h265"}
 	}
 	var lastErr error
 	for _, codec := range codecs {

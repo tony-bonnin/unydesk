@@ -25,7 +25,8 @@ const (
 	trayMenuCopyAccessID  = 1002
 	trayMenuToggleAccess  = 1003
 	trayMenuOpenAccount   = 1004
-	trayMenuQuit          = 1005
+	trayMenuTestServer    = 1005
+	trayMenuQuit          = 1006
 )
 
 var (
@@ -265,26 +266,28 @@ func showLocalHostTrayMenu(hwnd win.HWND) {
 		index++
 		localHostTrayInsertSeparator(menu, index)
 		index++
-		localHostTrayInsertItem(menu, index, trayMenuApproveAccess, "Allow remote access request", true)
+		localHostTrayInsertItem(menu, index, trayMenuApproveAccess, hostText("tray.allow_request"), true)
 		index++
-		localHostTrayInsertItem(menu, index, trayMenuDenyAccess, "Deny remote access request", true)
+		localHostTrayInsertItem(menu, index, trayMenuDenyAccess, hostText("tray.deny_request"), true)
 		index++
 	}
 	localHostTrayInsertSeparator(menu, index)
 	index++
-	localHostTrayInsertItem(menu, index, trayMenuCopyAccessID, "Copy Access ID", strings.TrimSpace(snapshot.PublicID) != "")
+	localHostTrayInsertItem(menu, index, trayMenuCopyAccessID, hostText("tray.copy_access_id"), strings.TrimSpace(snapshot.PublicID) != "")
 	index++
-	toggleLabel := "Stop remote access"
+	toggleLabel := hostText("tray.stop_remote_access")
 	if !snapshot.AccessEnabled {
-		toggleLabel = "Resume remote access"
+		toggleLabel = hostText("tray.resume_remote_access")
 	}
 	localHostTrayInsertItem(menu, index, trayMenuToggleAccess, toggleLabel, true)
 	index++
-	localHostTrayInsertItem(menu, index, trayMenuOpenAccount, "Open Dashboard", strings.TrimSpace(snapshot.AccountURL) != "")
+	localHostTrayInsertItem(menu, index, trayMenuOpenAccount, hostText("tray.open_dashboard"), strings.TrimSpace(snapshot.AccountURL) != "")
+	index++
+	localHostTrayInsertItem(menu, index, trayMenuTestServer, hostText("tray.test_server"), strings.TrimSpace(snapshot.ServerURL) != "")
 	index++
 	localHostTrayInsertSeparator(menu, index)
 	index++
-	localHostTrayInsertItem(menu, index, trayMenuQuit, "Quit Host", true)
+	localHostTrayInsertItem(menu, index, trayMenuQuit, hostText("tray.quit_host"), true)
 
 	var point win.POINT
 	if !win.GetCursorPos(&point) {
@@ -378,6 +381,8 @@ func handleLocalHostTrayCommand(command uint32) {
 		updateLocalHostTrayTip()
 	case trayMenuOpenAccount:
 		openLocalHostAccount()
+	case trayMenuTestServer:
+		go testLocalHostServer()
 	case trayMenuQuit:
 		if trayShutdown != nil {
 			trayShutdown()
@@ -394,4 +399,23 @@ func openLocalHostAccount() {
 		return
 	}
 	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", snapshot.AccountURL).Start()
+}
+
+func testLocalHostServer() {
+	snapshot := localHostUI.snapshot()
+	serverURL := strings.TrimSpace(snapshot.ServerURL)
+	if serverURL == "" {
+		showLocalHostTrayNotification("UnyDesk", "No server route is configured yet.")
+		return
+	}
+
+	if _, err := fetchRuntimeConfig(serverURL, currentRuntimeServerCredential()); err != nil {
+		localHostUI.setDisconnected(err, 0)
+		showLocalHostTrayNotification("UnyDesk", "Server test failed. Reconnecting.")
+		triggerBootstrapWake()
+		return
+	}
+
+	showLocalHostTrayNotification("UnyDesk", "Server reachable. Registration refresh requested.")
+	triggerBootstrapWake()
 }

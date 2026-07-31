@@ -45,7 +45,7 @@ import {
 } from "/js/control/shared.js";
 
 (async () => {
-  const CONTROL_DIAGNOSTIC_BUILD = "20260704-stable-h264";
+  const CONTROL_DIAGNOSTIC_BUILD = "20260711-h264-av1-h265";
 
   const state = {
     csrfToken: "",
@@ -60,8 +60,8 @@ import {
     iceServers: [],
     runtimeFeatures: {},
     configuredVideoCodecs: ["h264", "h265", "av1"],
-    preferredVideoCodecs: ["h264", "h265", "av1"],
-    allowPremiumCodecPromotion: false,
+    preferredVideoCodecs: ["h264", "av1", "h265"],
+    allowPremiumCodecPromotion: true,
     disabledRealtimeCodecs: new Set(),
     activeRealtimeCodecOrder: [],
     codecPromotionTimer: null,
@@ -110,7 +110,10 @@ import {
     screenVideoPlaybackLogged: false,
     videoPlaybackTimer: null,
     screenFallbackRequested: false,
+    screenFallbackRequestedAt: 0,
     screenFallbackAttempts: 0,
+    screenFallbackSocket: null,
+    screenFallbackSocketConnected: false,
     hasRenderedScreenFrame: false,
     screenDecodeInFlight: false,
     pendingScreenBuffer: null,
@@ -329,6 +332,16 @@ import {
     return url.toString();
   }
 
+  function screenFallbackSocketURL() {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = new URL(`${protocol}//${window.location.host}/api/v1/sessions/${encodeURIComponent(state.sessionID)}/screen/ws`);
+    url.searchParams.set("role", "viewer");
+    if (state.standaloneToken) {
+      url.searchParams.set("standalone_token", state.standaloneToken);
+    }
+    return url.toString();
+  }
+
   function browserIdentityRequestURL() {
     let token = window.localStorage.getItem("unydesk.browser.token") || "";
     if (!token && window.crypto && window.crypto.getRandomValues) {
@@ -364,8 +377,8 @@ import {
       state.iceServers = [];
       state.runtimeFeatures = {};
       state.allowPremiumCodecPromotion = resolvePremiumCodecPromotionSetting({});
-      state.configuredVideoCodecs = ["h264", "h265", "av1"];
-      state.preferredVideoCodecs = ["h264", "h265", "av1"];
+      state.configuredVideoCodecs = ["h264", "av1", "h265"];
+      state.preferredVideoCodecs = ["h264", "av1", "h265"];
       appendTransportLog(`ICE config unavailable: ${error.message}`);
     }
   }
@@ -379,7 +392,7 @@ import {
   }
 
   function normalizePreferredVideoCodecs(codecs) {
-    const values = Array.isArray(codecs) && codecs.length > 0 ? codecs : ["h264", "h265", "av1"];
+    const values = Array.isArray(codecs) && codecs.length > 0 ? codecs : ["h264", "av1", "h265"];
     const normalized = [];
     const seen = new Set();
     values.forEach((raw) => {
@@ -390,7 +403,7 @@ import {
       seen.add(codec);
       normalized.push(codec);
     });
-    return normalized.length > 0 ? normalized : ["h264", "h265", "av1"];
+    return normalized.length > 0 ? normalized : ["h264", "av1", "h265"];
   }
 
   function orderedUniqueCodecs(values) {
@@ -413,7 +426,7 @@ import {
     if (Array.isArray(codecs) && codecs.length > 0) {
       state.configuredVideoCodecs = codecs;
     }
-    const order = orderedUniqueCodecs(["h264", "h265", "av1", ...(codecs || [])]);
+    const order = orderedUniqueCodecs(["h264", "av1", "h265", ...(codecs || [])]);
     state.configuredVideoCodecs = saved;
     return order.length > 0 ? order : ["h264"];
   }
@@ -778,6 +791,61 @@ import {
     state.transportRecoveryTimer = null;
   }
 
+  function closeScreenFallbackSocket() {
+    const socket = state.screenFallbackSocket;
+    state.screenFallbackSocket = null;
+    state.screenFallbackSocketConnected = false;
+    if (!socket) return;
+    try {
+      socket.close();
+    } catch (_error) {}
+  }
+
+  function openScreenFallbackSocket() {
+    if (!state.sessionID || state.screenFallbackSocket) return;
+    const socket = new WebSocket(screenFallbackSocketURL());
+    socket.binaryType = "arraybuffer";
+    state.screenFallbackSocket = socket;
+    socket.addEventListener("open", () => {
+      if (state.screenFallbackSocket !== socket) return;
+      state.screenFallbackSocketConnected = true;
+      appendTransportLog("peer frame websocket connected");
+    });
+    socket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        try {
+          const payload = JSON.parse(String(event.data || "{}"));
+          if (payload.type === "screen_stream") {
+            appendTransportLog(`peer frame websocket ${payload.state || "ready"}`);
+          }
+        } catch (_error) {}
+        return;
+      }
+      if (event.data instanceof ArrayBuffer) {
+        const reassembled = absorbScreenChunk(event.data);
+        if (!reassembled) return;
+        queueScreenBuffer(reassembled);
+      }
+    });
+    socket.addEventListener("close", () => {
+      if (state.screenFallbackSocket !== socket) return;
+      state.screenFallbackSocket = null;
+      state.screenFallbackSocketConnected = false;
+      appendTransportLog("peer frame websocket disconnected");
+      if (state.screenFallbackRequested) {
+        window.setTimeout(() => {
+          if (state.screenFallbackRequested && !state.screenFallbackSocket) openScreenFallbackSocket();
+        }, 1000);
+      }
+    });
+    socket.addEventListener("error", () => {
+      state.screenFallbackSocketConnected = false;
+      try {
+        socket.close();
+      } catch (_error) {}
+    });
+  }
+
   function scheduleTransportRecovery(reason) {
     if (state.transportRecoveryTimer || state.realtimeRetrying || !state.peerConnection || !state.remoteAnswerApplied) return;
     if (state.transportRecoveryAttempts >= 2) {
@@ -794,6 +862,17 @@ import {
     state.transportRecoveryTimer = window.setTimeout(() => {
       state.transportRecoveryTimer = null;
       if (isScreenVideoActive() || hasUsablePeerChannel() || !state.peerConnection || state.realtimeRetrying) return;
+      const iceState = String(state.peerConnection.iceConnectionState || "").toLowerCase();
+      const fallbackWarmupMs = state.screenFallbackRequestedAt ? nowMs() - state.screenFallbackRequestedAt : 0;
+      if (
+        state.screenFallbackRequested &&
+        (iceState === "new" || iceState === "checking") &&
+        fallbackWarmupMs < 12000
+      ) {
+        appendTransportLog(`transport recovery deferred: waiting for peer frame fallback while ICE is still ${iceState || "unknown"} (${Math.round(fallbackWarmupMs)}ms)`);
+        scheduleTransportRecovery(`peer frame fallback warmup after ${reason}`);
+        return;
+      }
       state.transportRecoveryAttempts += 1;
       appendTransportLog(`transport recovery ${state.transportRecoveryAttempts}/2: restarting WebRTC after ${reason}`);
       closeRealtimeSession({ preserveDisabledCodecs: true, preserveCodecPromotion: true });
@@ -808,8 +887,10 @@ import {
     if (attempt === 0) {
       if (state.screenFallbackRequested) return;
       state.screenFallbackRequested = true;
+      state.screenFallbackRequestedAt = nowMs();
       state.screenFallbackAttempts = 0;
       appendTransportLog(`requesting peer frame fallback: ${reason}`);
+      openScreenFallbackSocket();
     }
     state.screenFallbackAttempts = Math.max(state.screenFallbackAttempts, attempt + 1);
     const sent = sendViewerControlMessage({
@@ -836,7 +917,9 @@ import {
       return;
     }
     state.screenFallbackRequested = false;
+    state.screenFallbackRequestedAt = 0;
     state.screenFallbackAttempts = 0;
+    closeScreenFallbackSocket();
     state.videoPlaybackTimer = window.setTimeout(() => {
       state.videoPlaybackTimer = null;
       if (isScreenVideoActive()) return;
@@ -1571,7 +1654,9 @@ import {
     state.pendingViewerCandidates = [];
     state.appliedHostCandidates = new Set();
     state.screenFallbackRequested = false;
+    state.screenFallbackRequestedAt = 0;
     state.screenFallbackAttempts = 0;
+    closeScreenFallbackSocket();
     if (!options.preserveDisabledCodecs) {
       state.disabledRealtimeCodecs = new Set();
     }

@@ -126,11 +126,16 @@ func handleLocalHostUIBootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 		writeLocalHostUIPublicCORS(w, r, "POST, OPTIONS")
 	} else {
-		if origin == "" || !localHostUIAllowedOrigin(origin) {
+		serverURLKnown := strings.TrimSpace(localHostUI.snapshot().ServerURL) != "" || strings.TrimSpace(defaultServerURL) != ""
+		if origin == "" || (!localHostUIAllowedOrigin(origin) && (serverURLKnown || !localHostUIPublicOrigin(origin))) {
 			http.Error(w, "origin is not allowed for bootstrap routing", http.StatusForbidden)
 			return
 		}
-		writeLocalHostUICORS(w, r, "POST, OPTIONS")
+		if serverURLKnown {
+			writeLocalHostUICORS(w, r, "POST, OPTIONS")
+		} else {
+			writeLocalHostUIPublicCORS(w, r, "POST, OPTIONS")
+		}
 	}
 
 	if hasCredential {

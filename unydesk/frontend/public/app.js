@@ -53,6 +53,8 @@ document.addEventListener('alpine:init', () => {
     hosts: [],
     localHostPollTimer: null,
     localHostProbePromise: null,
+    localHostRoutePromise: null,
+    localHostLastRouteAt: 0,
     downloadsOpen: false,
     serviceStatusOpen: false,
     serviceStatus: {
@@ -189,6 +191,7 @@ document.addEventListener('alpine:init', () => {
           if (!`${this.standaloneHostPassword || ''}`.trim() && this.localHostRuntime.access_password) {
             this.standaloneHostPassword = this.localHostRuntime.access_password;
           }
+          await this.bootstrapLocalHostRouteIfNeeded();
           return true;
         } catch (_error) {
           const bridge = window.unydeskLocalHostBridge;
@@ -215,6 +218,34 @@ document.addEventListener('alpine:init', () => {
       } finally {
         this.localHostProbePromise = null;
       }
+    },
+
+    async bootstrapLocalHostRouteIfNeeded() {
+      if (!this.localHostRuntime.available) return false;
+      if (`${this.localHostRuntime.server_url || ''}`.trim()) return false;
+      if (this.localHostRoutePromise) return this.localHostRoutePromise;
+      const now = Date.now();
+      if (now - this.localHostLastRouteAt < 15000) return false;
+      this.localHostLastRouteAt = now;
+      this.localHostRoutePromise = (async () => {
+        try {
+          const bridge = window.unydeskLocalHostBridge;
+          if (!bridge || !bridge.bootstrap) return false;
+          const serverRoute = `${this.info.server_url || ''}`.trim() || window.location.origin || '';
+          this.localHostRuntime = await bridge.bootstrap(this.fetchWithTimeout.bind(this), this.localHostRuntime, {
+            domain: window.location.hostname || '',
+            server_url: serverRoute,
+            install_id: this.localHostRuntime.install_id,
+            public_id: this.localHostRuntime.public_id,
+          });
+          return true;
+        } catch (_error) {
+          return false;
+        } finally {
+          this.localHostRoutePromise = null;
+        }
+      })();
+      return this.localHostRoutePromise;
     },
 
     startLocalHostPolling(delayMs = 0) {
