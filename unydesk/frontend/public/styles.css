@@ -28,6 +28,7 @@ body {
     display: flex;
     margin: auto;
     min-height: 100vh;
+    min-height: -webkit-fill-available;
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
     color: var(--text);
     background: radial-gradient(circle at top left, rgba(115, 109, 254, 0.16), transparent 28%), radial-gradient(circle at bottom right, rgba(62, 58, 171, 0.10), transparent 32%), linear-gradient(180deg, #f7f8fd 0%, #eef1fb 100%);
@@ -61,7 +62,8 @@ button.btn.btn-secondary i {
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow);
     overflow: hidden;
-    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+            backdrop-filter: blur(12px);
     padding: 2rem;
 }
 
@@ -110,7 +112,8 @@ button.btn.btn-secondary i {
 }
 
 .language-switcher button.is-active {
-    filter: grayscale(0.33);
+    -webkit-filter: grayscale(0.33);
+            filter: grayscale(0.33);
     opacity: 0.33;
 }
 
@@ -118,7 +121,8 @@ button.btn.btn-secondary i {
     display: block;
     width: 1rem;
     box-shadow: 0 0 0 1px rgba(12, 16, 44, 0.08);
-    object-fit: cover;
+    -o-object-fit: cover;
+       object-fit: cover;
     border-radius: 999px;
     height: 0.95rem;
 }
@@ -181,7 +185,8 @@ button.btn.btn-secondary i {
 .brand-mark img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    -o-object-fit: cover;
+       object-fit: cover;
     display: block;
     max-width: 13.33rem;
 }
@@ -968,6 +973,7 @@ i.bi.bi-key-fill {
 .account-dashboard-shell {
   display: flex;
   min-height: 100vh;
+  min-height: -webkit-fill-available;
   background: #f6f7fb;
 }
 
@@ -975,6 +981,7 @@ i.bi.bi-key-fill {
   width: 236px;
   min-width: 236px;
   height: 100vh;
+  height: -webkit-fill-available;
   background: #fff;
   border-right: 1px solid #e7e9ef;
   display: flex;
@@ -1127,7 +1134,9 @@ i.bi.bi-key-fill {
     width: 100%;
     text-align: left;
     cursor: pointer;
-    appearance: none;
+    -webkit-appearance: none;
+       -moz-appearance: none;
+            appearance: none;
     box-shadow: none;
 }
 
@@ -1187,6 +1196,7 @@ i.bi.bi-key-fill {
   flex: 1;
   min-width: 0;
   height: 100vh;
+  height: -webkit-fill-available;
   display: flex;
   flex-direction: column;
   background: #f6f7fb;
@@ -1201,7 +1211,8 @@ i.bi.bi-key-fill {
     padding: 0.66rem 2rem 1rem;
     border-bottom: 1px solid rgba(62, 58, 171, 0.08);
     background: rgba(255, 255, 255, 0.76);
-    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(10px);
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1292,7 +1303,8 @@ i.bi.bi-key-fill {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+          backdrop-filter: blur(2px);
   z-index: 500;
   display: none;
 }
@@ -1596,7 +1608,8 @@ i.bi.bi-key-fill {
   position: fixed;
   inset: 0;
   background: rgba(16, 19, 41, 0.48);
-  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+          backdrop-filter: blur(8px);
   display: none;
   align-items: center;
   justify-content: center;
@@ -1627,6 +1640,7 @@ i.bi.bi-key-fill {
     padding: 3rem 2rem;
     border-bottom: 1px solid var(--border);
     background: #fff;
+    position: -webkit-sticky;
     position: sticky;
     top: 0;
 }
@@ -1930,6 +1944,8 @@ i.bi.bi-key-fill {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: -webkit-max-content;
+  min-width: -moz-max-content;
   min-width: max-content;
   color: var(--brand);
   font-weight: 800;
@@ -2087,12 +2103,14 @@ body.account-control-expanded .session-control-grid > .settings-card:first-child
 body.account-control-expanded .session-control-grid {
   display: block;
   height: 100vh;
+  height: -webkit-fill-available;
   margin: 0;
 }
 
 body.account-control-expanded .session-control-grid > .settings-card:first-child {
   width: 100vw;
   height: 100vh;
+  height: -webkit-fill-available;
   padding: 0;
   margin: 0;
   border: 0;
@@ -2105,6 +2123,7 @@ body.account-control-expanded .session-screen-card {
   margin-top: 0;
   width: 100vw;
   height: 100vh;
+  height: -webkit-fill-available;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -2118,7 +2137,9 @@ body.account-control-expanded .session-screen-card-head {
 body.account-control-expanded .session-screen-stage {
   width: 100vw;
   height: 100vh;
+  height: -webkit-fill-available;
   min-height: 100vh;
+  min-height: -webkit-fill-available;
   max-height: 100vh;
   margin: 0;
   border: 0;
@@ -2132,7 +2153,8 @@ body.account-control-expanded .session-screen-stage {
   display: block;
   width: 100%;
   height: auto;
-  object-fit: contain;
+  -o-object-fit: contain;
+     object-fit: contain;
   background: #dfe4ff;
 }
 
@@ -2361,6 +2383,7 @@ aside code {
     padding: 1rem;
     height: auto;
     min-height: 100vh;
+    min-height: -webkit-fill-available;
     border-radius: var(--radius-md);
   }
 
@@ -2432,6 +2455,7 @@ aside code {
   .account-workspace {
     height: auto;
     min-height: 100vh;
+    min-height: -webkit-fill-available;
   }
 
   .account-workspace-topbar {
@@ -2530,12 +2554,14 @@ aside code {
   .shell {
     width: 100%;
     min-height: 100vh;
+    min-height: -webkit-fill-available;
     padding: 0;
     border: 0;
     border-radius: 0;
     box-shadow: none;
     background: transparent;
-    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+            backdrop-filter: none;
     overflow: clip;
   }
 
@@ -2614,6 +2640,8 @@ aside code {
   .account-btn {
       min-height: 36px;
       min-width: 100%;
+      width: -webkit-max-content;
+      width: -moz-max-content;
       width: max-content;
       max-width: 100%;
       margin: 0;
