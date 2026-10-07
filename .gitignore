@@ -2,10 +2,15 @@ unyremote/backend/tmp/
 unyremote/backend/server/assets/
 unyremote/backend/logs/
 
+# Local git watcher / release outputs.
+dist/
+unydesk-git-sync.env
+
 # Local UnyDesk build outputs.
 unydesk/backend/unydesk
 unydesk/backend/unydesk-host
 unydesk/backend/unydesk-host.exe
+unydesk/backend/tmp/
 
 # Per-install paired host binaries are generated on demand and can become huge.
 unydesk/backend/tmp/host-downloads/paired/
